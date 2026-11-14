@@ -7,13 +7,28 @@
 # 注意：交易代碼 11（setStreamVolume）是從這支手機的 framework.jar 讀出來的，
 # 只適用 LG G8X（Android 12）。換手機或系統更新後要重查。
 
+import os
 import re
 import subprocess
 import threading
 import tkinter as tk
 from tkinter import messagebox
 
-ADB = "adb"  # adb on PATH, or put the full path to adb.exe here
+
+def find_adb():
+    # 本機的 adb 路徑寫在 tools/adb_path.txt（不進 git）；沒有這個檔就用 PATH 上的 adb
+    path_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adb_path.txt")
+    try:
+        with open(path_file, encoding="utf-8") as f:
+            p = f.read().strip()
+            if p:
+                return p
+    except OSError:
+        pass
+    return "adb"
+
+
+ADB = find_adb()
 TXN_SET_STREAM_VOLUME = 11
 STREAM_MUSIC = 3
 FLAG_HIFI_DAC_VOLUME = 0x20000
