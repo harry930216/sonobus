@@ -137,6 +137,16 @@ protected:
     std::unique_ptr<ToggleButton> mOptionsAllowBluetoothInput;
     std::unique_ptr<ToggleButton> mOptionsDisableShortcutButton;
     std::unique_ptr<ToggleButton> mOptionsCloseToTrayButton; // SonoBus-G8X, Windows standalone only
+
+    // SonoBus-G8X: remote phone-volume cap (phone: edits its own cap; desktop: sends "/volcap")
+    std::unique_ptr<Label> mOptionsPhoneCapLabel;
+    std::unique_ptr<Slider> mOptionsPhoneCapSlider;
+    bool mPhoneCapSyncing = false;
+    bool mPhoneCapAsking = false;         // a raise confirmation is open
+    double mPhoneCapHoldUntilMs = 0.0;    // desktop: keep the sent value shown until the phone reports
+    void phoneCapChanged(int newCap);
+    void applyPhoneCap(int newCap, bool confirmed);
+    void updatePhoneCapControl(bool force = false);
     std::unique_ptr<TextButton> mOptionsSavePluginDefaultButton;
     std::unique_ptr<TextButton> mOptionsResetPluginDefaultButton;
 
@@ -183,6 +193,7 @@ protected:
     FlexBox optionsSnapToMouseBox;
     FlexBox optionsDisableShortcutsBox;
     FlexBox optionsCloseToTrayBox;
+    FlexBox optionsPhoneCapBox;
     FlexBox optionsDefaultLevelBox;
     FlexBox optionsLanguageBox;
     FlexBox optionsAllowBluetoothBox;

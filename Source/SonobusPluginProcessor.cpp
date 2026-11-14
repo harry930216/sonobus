@@ -48,12 +48,20 @@ typedef int socklen_t;
 //   /vol 40      -> set to 40% of max
 //   /vol =12     -> set absolute index (75-step scale on LG Quad DAC phones)
 //   /vol +  /vol +3 /vol -  /vol -5 -> step up/down (default 1 step)
-// The phone answers (and pushes every change it sees) with "[vol] <index>/<max> (<pct>%) hifi|std".
+//   /volcap =12  -> set the remote cap (75-step scale); raising it needs a trailing " !"
+// The phone answers (and pushes every change it sees) with
+// "[vol] <index>/<max> (<pct>%) hifi|std cap<native cap> rcap<cap, 75-step> ceil<ceiling, 75-step> [note]".
 // The desktop build turns those replies into the phone-volume slider instead of chat lines.
 static bool sbIsVolumeCommand (const String & message)
 {
     auto t = message.trim();
     return t == "/vol" || t.startsWith ("/vol ") || t.startsWith ("/vol+") || t.startsWith ("/vol-");
+}
+
+static bool sbIsVolumeCapCommand (const String & message)
+{
+    auto t = message.trim();
+    return t == "/volcap" || t.startsWith ("/volcap ") || t.startsWith ("/volcap=");
 }
 
 static bool sbIsVolumeReport (const String & message)
@@ -311,15 +319,23 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
     return v.max > 0;
 }
 
-// Hard limits for volume changes coming from the network (ear safety; independent of the desktop UI).
-// On the 75-step scale; scaled for phones on a different scale.
-static constexpr int sbRemoteVolumeCap75 = 9;   // never set above this from a remote command (9/75 = 12%, for sensitive headphones)
+// Limits for volume changes coming from the network (ear safety; independent of the desktop UI).
+// On the 75-step scale; scaled for phones on a different scale. The cap itself is adjustable
+// (SonobusAudioProcessor::getPhoneRemoteCap75), but never above phoneRemoteCapCeiling75.
 static constexpr int sbRemoteMaxRaise75  = 5;   // larger single raises need the "!" confirmation marker
                                                 // (same threshold the desktop asks about)
 
-static int sbRemoteVolumeCap (const SbPhoneVolume & v)
+static int sbRemoteVolumeCap (const SbPhoneVolume & v, int cap75)
 {
-    return jmax (1, v.max * sbRemoteVolumeCap75 / 75);
+    cap75 = jlimit (1, SonobusAudioProcessor::phoneRemoteCapCeiling75, cap75);
+    return jmax (1, v.max * cap75 / 75);
+}
+
+// The remote cap is kept in its own small file and written on every change, so a lowered cap
+// survives the app being killed before the plugin state is saved.
+static File sbRemoteCapFile()
+{
+    return File::getSpecialLocation (File::userApplicationDataDirectory).getChildFile ("g8x_remote_cap75.txt");
 }
 
 // Lowest index the phone can really be at. A fresh reading is exact; when the stored 75-step
@@ -332,12 +348,14 @@ static int sbLowestPlausibleIndex (const SbPhoneVolume & v)
     return jmin (v.cur, lo);
 }
 
-static String sbFormatVolumeReport (const SbPhoneVolume & v, const String & note = {})
+static String sbFormatVolumeReport (const SbPhoneVolume & v, int cap75, const String & note = {})
 {
     return "[vol] " + String (v.cur) + "/" + String (v.max)
            + " (" + String (v.cur * 100 / jmax (1, v.max)) + "%)"
            + (v.hifi ? " hifi" : " std")
-           + " cap" + String (sbRemoteVolumeCap (v))
+           + " cap" + String (sbRemoteVolumeCap (v, cap75))
+           + " rcap" + String (jlimit (1, SonobusAudioProcessor::phoneRemoteCapCeiling75, cap75))
+           + " ceil" + String (SonobusAudioProcessor::phoneRemoteCapCeiling75)
            + (note.isNotEmpty() ? " " + note : String());
 }
 
@@ -346,7 +364,7 @@ static uint32 sbVolumeCommandSeq = 0;
 
 // Returns the report line to send back; lastReported receives the index that was reported.
 // If deferRequested is given and set to true, nothing was changed and the caller should retry later.
-static String sbApplyVolumeCommand (const String & message, int & lastReported, bool* deferRequested = nullptr)
+static String sbApplyVolumeCommand (const String & message, int & lastReported, int cap75, bool* deferRequested = nullptr)
 {
     auto args = message.trim().substring (4).trim();
 
@@ -379,7 +397,7 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
         int step = 1;
         if (rest.isNotEmpty())
         {
-            if (! isNumber (rest, "0123456789")) { lastReported = curVol; return sbFormatVolumeReport (v, "bad"); }
+            if (! isNumber (rest, "0123456789")) { lastReported = curVol; return sbFormatVolumeReport (v, cap75, "bad"); }
             step = jlimit (1, jmax (1, v.max), rest.getIntValue());
         }
         target = curVol + (args.startsWithChar ('+') ? step : -step);
@@ -387,19 +405,19 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
     else if (args.startsWithChar ('='))
     {
         auto rest = args.substring (1).trim();
-        if (! isNumber (rest, "0123456789")) { lastReported = curVol; return sbFormatVolumeReport (v, "bad"); }
+        if (! isNumber (rest, "0123456789")) { lastReported = curVol; return sbFormatVolumeReport (v, cap75, "bad"); }
         target = rest.getIntValue(); // absolute index on the native scale
     }
     else if (args.isNotEmpty())
     {
-        if (! isNumber (args, "0123456789.")) { lastReported = curVol; return sbFormatVolumeReport (v, "bad"); }
+        if (! isNumber (args, "0123456789.")) { lastReported = curVol; return sbFormatVolumeReport (v, cap75, "bad"); }
         target = roundToInt (args.getFloatValue() * (float) v.max / 100.0f); // percent
     }
 
     target = jlimit (0, v.max, target);
 
     String note;
-    const int cap = sbRemoteVolumeCap (v);
+    const int cap = sbRemoteVolumeCap (v, cap75);
     const int maxRaise = jmax (1, v.max * sbRemoteMaxRaise75 / 75);
 
     if (target > cap && target >= curLow)
@@ -410,7 +428,7 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
         if (curLow >= cap)
         {
             lastReported = curVol;
-            return sbFormatVolumeReport (v, "capped");
+            return sbFormatVolumeReport (v, cap75, "capped");
         }
         target = cap;
         note = "capped";
@@ -427,7 +445,7 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
     if (target - curLow > maxRaise && ! confirmed)
     {
         lastReported = curVol;
-        return sbFormatVolumeReport (v, "refused");
+        return sbFormatVolumeReport (v, cap75, "refused");
     }
 
     // One 15-step value covers several 75-step values (1..9 all read as 1), so a change made on
@@ -479,11 +497,11 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
     }
 
     lastReported = v.cur;
-    return sbFormatVolumeReport (v, note);
+    return sbFormatVolumeReport (v, cap75, note);
 }
 
 // Called periodically on the phone: returns a report line when the volume changed since last report.
-static String sbCheckVolumeChanged (int & lastReported)
+static String sbCheckVolumeChanged (int & lastReported, int cap75)
 {
     auto* env = getEnv();
     if (env == nullptr) return {};
@@ -494,9 +512,58 @@ static String sbCheckVolumeChanged (int & lastReported)
     if (! sbReadPhoneVolume (env, am.get(), v) || v.stale || v.cur == lastReported) return {};
 
     lastReported = v.cur;
-    return sbFormatVolumeReport (v);
+    return sbFormatVolumeReport (v, cap75);
+}
+
+// "/volcap =N [!]": set the remote cap (75-step scale). Lowering is always allowed; raising needs
+// the "!" marker (confirmed on the desktop). Never above the compiled-in ceiling; anything that is
+// not a plain number in 1..ceiling changes nothing. The volume itself is not touched.
+static String sbApplyVolumeCapCommand (const String & message, int & lastReported, SonobusAudioProcessor & proc)
+{
+    auto args = message.trim().substring (7).trim(); // after "/volcap"
+    const bool confirmed = args.endsWithChar ('!');
+    if (confirmed) args = args.dropLastCharacters (1).trim();
+
+    auto* env = getEnv();
+    if (env == nullptr) return "[vol] error: no JNI env";
+    auto am = sbGetAudioManager (env);
+    if (am == nullptr) return "[vol] error: no AudioManager";
+    SbPhoneVolume v;
+    if (! sbReadPhoneVolume (env, am.get(), v)) return "[vol] error: cannot read volume";
+
+    const int oldCap = proc.getPhoneRemoteCap75();
+    String note;
+    const auto rest = args.startsWithChar ('=') ? args.substring (1).trim() : String();
+
+    if (rest.isEmpty() || rest.length() > 6 || ! rest.containsOnly ("0123456789"))
+        note = "capbad";
+    else
+    {
+        const int want = rest.getIntValue();
+        if (want < 1 || want > SonobusAudioProcessor::phoneRemoteCapCeiling75)
+            note = "capbad";
+        else if (want > oldCap && ! confirmed)
+            note = "caprefused";
+        else
+        {
+            proc.setPhoneRemoteCap75 (want);
+            note = "capset";
+        }
+    }
+
+    lastReported = v.cur;
+    return sbFormatVolumeReport (v, proc.getPhoneRemoteCap75(), note);
 }
 #endif
+
+void SonobusAudioProcessor::setPhoneRemoteCap75 (int cap75)
+{
+    const int c = jlimit (1, phoneRemoteCapCeiling75, cap75);
+    mPhoneRemoteCap75 = c;
+   #if JUCE_ANDROID
+    sbRemoteCapFile().replaceWithText (String (c));
+   #endif
+}
 
 // Lightweight Timer that runs a lambda (used for the phone-volume watcher)
 struct SbLambdaTimer : public Timer
@@ -1159,12 +1226,19 @@ mState (*this, &mUndoManager, "SonoBusAoO",
     mState.addParameterListener (paramInGain, this);
 
    #if JUCE_ANDROID
+    // SonoBus-G8X: remote volume cap saved on the phone (anything unreadable keeps the default)
+    {
+        auto saved = sbRemoteCapFile().loadFileAsString().trim();
+        if (saved.isNotEmpty() && saved.length() <= 6 && saved.containsOnly("0123456789"))
+            mPhoneRemoteCap75 = jlimit(1, phoneRemoteCapCeiling75, saved.getIntValue());
+    }
+
     // SonoBus-G8X: push phone volume changes (keys, LG touch panel, other apps) to connected peers
     {
         auto watcher = std::make_unique<SbLambdaTimer>();
         watcher->fn = [this]() {
             if (getNumberRemotePeers() == 0) { mPhoneVolLastReported = -1; return; }
-            auto report = sbCheckVolumeChanged(mPhoneVolLastReported);
+            auto report = sbCheckVolumeChanged(mPhoneVolLastReported, getPhoneRemoteCap75());
             if (report.isNotEmpty())
                 sendChatEvent(SBChatEvent(SBChatEvent::UserType, getCurrentJoinedGroup(), getCurrentUsername(), "", "", report));
         };
@@ -3185,7 +3259,20 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
 
             SBChatEvent chatevent(SBChatEvent::UserType, group, from, targets, tags, message);
 
-            if (!isAddressBlocked(endpoint->ipaddr) && sbIsVolumeCommand(message)) {
+            if (!isAddressBlocked(endpoint->ipaddr) && sbIsVolumeCapCommand(message)) {
+               #if JUCE_ANDROID
+                // SonoBus-G8X: change the remote cap on the message thread, then report back
+                WeakReference<SonobusAudioProcessor> weakThis (this);
+                MessageManager::callAsync([weakThis, message]() {
+                    auto* self = weakThis.get();
+                    if (self == nullptr) return;
+                    ++sbVolumeCommandSeq; // drop any deferred volume command; it is re-sent if still wanted
+                    auto status = sbApplyVolumeCapCommand(message, self->mPhoneVolLastReported, *self);
+                    self->sendChatEvent(SBChatEvent(SBChatEvent::UserType, self->getCurrentJoinedGroup(), self->getCurrentUsername(), "", "", status));
+                });
+               #endif
+            }
+            else if (!isAddressBlocked(endpoint->ipaddr) && sbIsVolumeCommand(message)) {
                #if JUCE_ANDROID
                 // SonoBus-G8X: apply on the message thread, then report the result back to the group
                 WeakReference<SonobusAudioProcessor> weakThis (this);
@@ -3199,7 +3286,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
 
                     const uint32 seq = ++sbVolumeCommandSeq;
                     bool defer = false;
-                    auto status = sbApplyVolumeCommand(message, self->mPhoneVolLastReported, &defer);
+                    auto status = sbApplyVolumeCommand(message, self->mPhoneVolLastReported, self->getPhoneRemoteCap75(), &defer);
 
                     if (! defer) { sendReply(self, status); return; }
 
@@ -3207,7 +3294,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                     Timer::callAfterDelay(650, [weakThis, message, seq, sendReply]() {
                         auto* s2 = weakThis.get();
                         if (s2 == nullptr || seq != sbVolumeCommandSeq) return;
-                        sendReply(s2, sbApplyVolumeCommand(message, s2->mPhoneVolLastReported, nullptr));
+                        sendReply(s2, sbApplyVolumeCommand(message, s2->mPhoneVolLastReported, s2->getPhoneRemoteCap75(), nullptr));
                     });
                 });
                #endif
@@ -3220,13 +3307,22 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                     int cur = body.substring(0, slash).getIntValue();
                     int mx = body.substring(slash + 1).getIntValue();
                     auto tokens = StringArray::fromTokens(body, " ", "");
-                    int cap = 0;
-                    for (auto & tok : tokens)
-                        if (tok.startsWith("cap") && tok.length() > 3 && tok.substring(3).containsOnly("0123456789"))
-                            cap = tok.substring(3).getIntValue();
+                    int cap = 0, rcap = 0, ceil75 = 0;
+                    auto digitsAfter = [] (const String & tok, const char* prefix) {
+                        auto n = (int) strlen(prefix);
+                        return tok.startsWith(prefix) && tok.length() > n && tok.length() <= n + 6
+                               && tok.substring(n).containsOnly("0123456789") ? tok.substring(n).getIntValue() : 0;
+                    };
+                    for (auto & tok : tokens) {
+                        if (auto c = digitsAfter(tok, "cap")) cap = c;
+                        if (auto c = digitsAfter(tok, "rcap")) rcap = c;
+                        if (auto c = digitsAfter(tok, "ceil")) ceil75 = c;
+                    }
                     if (mx > 0) {
                         mPhoneVolMax = mx;
                         mPhoneVolCap = cap > 0 ? cap : mx;
+                        mPhoneVolRemoteCap75 = rcap;
+                        mPhoneVolCeil75 = ceil75;
                         mPhoneVolIndex = cur;
                         mPhoneVolNote = tokens.contains("refused") ? 2 : (tokens.contains("capped") ? 1 : 0);
                         ++mPhoneVolSerial;

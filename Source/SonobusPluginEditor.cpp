@@ -6236,7 +6236,7 @@ void SonobusAudioProcessorEditor::sendPhoneVolume(int target)
     if (target == cur) return;
 
     // Guard against sudden loud jumps (sensitive headphones): ask before raising more than 5 steps at once.
-    // The phone independently caps remote commands and refuses unconfirmed raises above 10 steps.
+    // The phone independently caps remote commands and refuses unconfirmed raises above 5 steps.
     if (cur >= 0 && target - cur > 5) {
         Component::SafePointer<SonobusAudioProcessorEditor> safeThis(this);
         AlertWindow::showOkCancelBox (AlertWindow::QuestionIcon,
@@ -6272,6 +6272,8 @@ void SonobusAudioProcessorEditor::updatePhoneVolume()
         if (processor.mPhoneVolMax.load() > 0) {
             processor.mPhoneVolMax = 0;
             processor.mPhoneVolIndex = -1;
+            processor.mPhoneVolRemoteCap75 = 0;
+            processor.mPhoneVolCeil75 = 0;
             mPhoneVolSlider->updateText();
         }
         mPhoneVolQueries = 0;

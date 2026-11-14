@@ -810,6 +810,18 @@ public:
     std::atomic<int> mPhoneVolNote { 0 };  // 0 ok, 1 capped, 2 refused (last report)
     std::atomic<uint32> mPhoneVolSerial { 0 };
     std::atomic<uint32> mPhoneVolErrorSerial { 0 };
+    std::atomic<int> mPhoneVolRemoteCap75 { 0 }; // the phone's adjustable remote cap (75-step), 0 = unknown / older phone build
+    std::atomic<int> mPhoneVolCeil75 { 0 };      // the phone's compiled-in ceiling for that cap (75-step), 0 = unknown
+
+    // Phone side: remote (desktop) commands never set the volume above this cap (75-step scale).
+    // Changed in the phone's options or by "/volcap" commands (raising needs confirmation either way),
+    // and never above the compiled-in ceiling.
+    static constexpr int phoneRemoteCapCeiling75 = 15; // 15/75 = 20%: absolute limit for remote control (ear safety)
+    static constexpr int phoneRemoteCapDefault75 = 9;  // 9/75 = 12%
+    int getPhoneRemoteCap75() const { return mPhoneRemoteCap75.load(); }
+    void setPhoneRemoteCap75(int cap75); // clamps to 1..ceiling; on the phone also persists it immediately
+    std::atomic<int> mPhoneRemoteCap75 { phoneRemoteCapDefault75 };
+
     int mPhoneVolLastReported = -1;          // phone side: last index pushed to peers (message thread)
     std::unique_ptr<Timer> mPhoneVolWatchTimer; // phone side: pushes volume changes to peers
     void setLastChatWidth(int width) { mLastChatWidth = width;}
