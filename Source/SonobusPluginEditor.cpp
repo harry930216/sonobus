@@ -6244,9 +6244,10 @@ void SonobusAudioProcessorEditor::sendPhoneVolume(int target)
         auto * aw = new AlertWindow ("Phone Volume",
                                      "Raise phone volume from " + String(cur) + " to " + String(target)
                                        + " (+" + String(target - cur) + " steps)?",
-                                     MessageBoxIconType::QuestionIcon, this);
-        aw->addButton ("Raise", 1);
+                                     MessageBoxIconType::NoIcon, this);
+        // Cancel first: the default keyboard focus goes to the first button, so Enter means Cancel
         aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        aw->addButton ("Raise", 1);
         aw->enterModalState (true, ModalCallbackFunction::create ([safeThis, cur, target](int result) {
                                  if (safeThis == nullptr) return;
                                  if (result == 1) safeThis->sendPhoneVolumeConfirmed(target, true);

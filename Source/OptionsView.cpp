@@ -617,8 +617,9 @@ static void sbConfirmCapRaise (Component * assoc, int oldCap, int newCap, std::f
                                 [done] (int result) { done(result == 1); });
 #else
     auto * aw = new AlertWindow(title, message, MessageBoxIconType::NoIcon, assoc);
-    aw->addButton(TRANS("Raise"), 1);
+    // Cancel first: the default keyboard focus goes to the first button, so Enter means Cancel
     aw->addButton(TRANS("Cancel"), 0, KeyPress(KeyPress::escapeKey));
+    aw->addButton(TRANS("Raise"), 1);
     aw->enterModalState(true, ModalCallbackFunction::create([done] (int result) { done(result == 1); }), true);
 #endif
 }
@@ -637,9 +638,11 @@ void OptionsView::phoneCapChanged(int newCap)
     if (mPhoneCapLastSent > 0 && Time::getMillisecondCounterHiRes() < mPhoneCapHoldUntilMs)
         oldCap = mPhoneCapLastSent;
 #endif
-    if (mPhoneCapAsking) return; // a raise confirmation is already open
     newCap = jlimit(1, ceiling, newCap);
     if (newCap == oldCap) { updatePhoneCapControl(true); return; }
+    // While a raise confirmation is open (or seems to be: a native box can vanish without a callback
+    // when Android recreates the activity), only further raises are blocked; lowering always works.
+    if (mPhoneCapAsking && newCap > oldCap) { updatePhoneCapControl(true); return; }
 
     if (newCap > oldCap) {
         // raising the cap always asks first (lowering is always safe)

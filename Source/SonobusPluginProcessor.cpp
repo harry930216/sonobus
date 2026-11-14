@@ -542,6 +542,8 @@ static String sbApplyVolumeCapCommand (const String & message, int & lastReporte
             note = proc.setPhoneRemoteCap75 (want) ? "capset" : "capsavefail";
     }
 
+    // If the volume cannot be read now, the watcher re-reports (with the new cap) on its next tick.
+    lastReported = -1;
     auto* env = getEnv();
     if (env == nullptr) return "[vol] error: no JNI env";
     auto am = sbGetAudioManager (env);
