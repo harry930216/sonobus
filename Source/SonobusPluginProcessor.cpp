@@ -48,74 +48,222 @@ typedef int socklen_t;
 //   /vol 40      -> set to 40% of max
 //   /vol =12     -> set absolute index (75-step scale on LG Quad DAC phones)
 //   /vol +  /vol +3 /vol -  /vol -5 -> step up/down (default 1 step)
-// Returns a status line to send back, or an empty string if the message is not a volume command.
+// The phone answers (and pushes every change it sees) with "[vol] <index>/<max> (<pct>%) hifi|std".
+// The desktop build turns those replies into the phone-volume slider instead of chat lines.
 static bool sbIsVolumeCommand (const String & message)
 {
     auto t = message.trim();
     return t == "/vol" || t.startsWith ("/vol ") || t.startsWith ("/vol+") || t.startsWith ("/vol-");
 }
 
-#if JUCE_ANDROID
-static String sbApplyVolumeCommand (const String & message)
+static bool sbIsVolumeReport (const String & message)
 {
-    auto args = message.trim().substring (4).trim();
+    return message.startsWith ("[vol] ");
+}
 
-    auto* env = getEnv();
-    if (env == nullptr) return "[vol] no JNI env";
+#if JUCE_ANDROID
+static bool sbClearJniException (JNIEnv* env)
+{
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return true; }
+    return false;
+}
 
-    LocalRef<jobject> audioManager (env->CallObjectMethod (getAppContext().get(), AndroidContext.getSystemService,
-                                                           javaString ("audio").get()));
-    if (audioManager == nullptr) return "[vol] no AudioManager";
+struct SbPhoneVolume
+{
+    int cur = 0;
+    int max = 0;
+    bool hifi = false;   // true when cur/max are on LG's 75-step Hi-Fi scale
+    jint flag = 0;       // flags to pass to setStreamVolume
+};
 
-    LocalRef<jclass> amClass (env->GetObjectClass (audioManager.get()));
+// Suffix AudioService uses for the per-device Settings.System key "volume_music_<suffix>"
+static String sbOutputDeviceKey (JNIEnv* env, jobject am)
+{
+    LocalRef<jclass> amClass (env->GetObjectClass (am));
+    auto getDevicesId = env->GetMethodID (amClass.get(), "getDevices", "(I)[Landroid/media/AudioDeviceInfo;");
+    if (sbClearJniException (env) || getDevicesId == nullptr) return "headphone";
+
+    LocalRef<jobjectArray> devs ((jobjectArray) env->CallObjectMethod (am, getDevicesId, (jint) 2)); // GET_DEVICES_OUTPUTS
+    if (sbClearJniException (env) || devs == nullptr) return "headphone";
+
+    LocalRef<jclass> infoClass (env->FindClass ("android/media/AudioDeviceInfo"));
+    auto getTypeId = env->GetMethodID (infoClass.get(), "getType", "()I");
+    if (sbClearJniException (env) || getTypeId == nullptr) return "headphone";
+
+    bool headphones = false, headset = false, usb = false, a2dp = false;
+    const auto n = env->GetArrayLength (devs.get());
+
+    for (jsize i = 0; i < n; ++i)
+    {
+        LocalRef<jobject> d (env->GetObjectArrayElement (devs.get(), i));
+        switch (env->CallIntMethod (d.get(), getTypeId))
+        {
+            case 3:  headphones = true; break; // TYPE_WIRED_HEADPHONES
+            case 4:  headset = true; break;    // TYPE_WIRED_HEADSET
+            case 22: usb = true; break;        // TYPE_USB_HEADSET
+            case 8:  a2dp = true; break;       // TYPE_BLUETOOTH_A2DP
+            default: break;
+        }
+        sbClearJniException (env);
+    }
+
+    if (headset)    return "headset";
+    if (headphones) return "headphone";
+    if (usb)        return "usb_headset";
+    if (a2dp)       return "bt_a2dp";
+    return "speaker";
+}
+
+static int sbReadSystemSettingInt (JNIEnv* env, const String & key, int fallback)
+{
+    auto ctx = getAppContext();
+    LocalRef<jclass> ctxClass (env->GetObjectClass (ctx.get()));
+    auto getCrId = env->GetMethodID (ctxClass.get(), "getContentResolver", "()Landroid/content/ContentResolver;");
+    if (sbClearJniException (env) || getCrId == nullptr) return fallback;
+
+    LocalRef<jobject> resolver (env->CallObjectMethod (ctx.get(), getCrId));
+    if (sbClearJniException (env) || resolver == nullptr) return fallback;
+
+    LocalRef<jclass> sysClass (env->FindClass ("android/provider/Settings$System"));
+    if (sbClearJniException (env) || sysClass == nullptr) return fallback;
+
+    auto getIntId = env->GetStaticMethodID (sysClass.get(), "getInt", "(Landroid/content/ContentResolver;Ljava/lang/String;I)I");
+    if (sbClearJniException (env) || getIntId == nullptr) return fallback;
+
+    int v = env->CallStaticIntMethod (sysClass.get(), getIntId, resolver.get(), javaString (key).get(), (jint) fallback);
+    if (sbClearJniException (env)) return fallback;
+    return v;
+}
+
+static bool sbIsLgPhone (JNIEnv* env)
+{
+    LocalRef<jclass> buildClass (env->FindClass ("android/os/Build"));
+    if (sbClearJniException (env) || buildClass == nullptr) return false;
+    auto mfId = env->GetStaticFieldID (buildClass.get(), "MANUFACTURER", "Ljava/lang/String;");
+    if (sbClearJniException (env) || mfId == nullptr) return false;
+    LocalRef<jstring> mf ((jstring) env->GetStaticObjectField (buildClass.get(), mfId));
+    if (sbClearJniException (env) || mf == nullptr) return false;
+    auto s = juceString (env, mf.get());
+    return s.equalsIgnoreCase ("LGE") || s.startsWithIgnoreCase ("LG");
+}
+
+static LocalRef<jobject> sbGetAudioManager (JNIEnv* env)
+{
+    LocalRef<jobject> am (env->CallObjectMethod (getAppContext().get(), AndroidContext.getSystemService,
+                                                 javaString ("audio").get()));
+    sbClearJniException (env);
+    return am;
+}
+
+// LG Hi-Fi Quad DAC phones keep STREAM_MUSIC on a 75-step scale, but third-party callers of the
+// standard API only get the legacy 15-step scale (written index x5). Passing LG's
+// FLAG_HIFI_DAC_VOLUME (0x20000) to the public setStreamVolume makes the index a 75-step one
+// (verified with adb on the G8X, 2026-11-15). LG's getters are hidden API and may be blocked for
+// apps, so the current 75-step value is read from Settings.System volume_music_<device>, which
+// AudioService persists (with up to ~0.5 s delay).
+static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
+{
+    LocalRef<jclass> amClass (env->GetObjectClass (am));
     auto getMaxId = env->GetMethodID (amClass.get(), "getStreamMaxVolume", "(I)I");
     auto getVolId = env->GetMethodID (amClass.get(), "getStreamVolume", "(I)I");
-    auto setVolId = env->GetMethodID (amClass.get(), "setStreamVolume", "(III)V");
-    if (getMaxId == nullptr || getVolId == nullptr || setVolId == nullptr) { env->ExceptionClear(); return "[vol] AudioManager methods missing"; }
+    if (sbClearJniException (env) || getMaxId == nullptr || getVolId == nullptr) return false;
 
-    // LG Hi-Fi Quad DAC phones keep STREAM_MUSIC on a 75-step scale, but third-party callers
-    // of the standard API only get the legacy 15-step scale (index x5). LG's own extensions
-    // (FLAG_HIFI_DAC_VOLUME, getHifiStreamMaxVolume, getHifiStreamVolume) address the 75 steps.
-    // Look them up by reflection so the code still works on other phones.
+    const jint streamMusic = 3; // AudioManager.STREAM_MUSIC
+
     auto lookupMethod = [&] (const char* name) -> jmethodID
     {
         auto id = env->GetMethodID (amClass.get(), name, "(I)I");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        if (sbClearJniException (env)) return nullptr;
         return id;
     };
 
     auto hifiMaxId = lookupMethod ("getHifiStreamMaxVolume");
     auto hifiVolId = lookupMethod ("getHifiStreamVolume");
     jint hifiFlag = 0;
-
     {
         auto flagId = env->GetStaticFieldID (amClass.get(), "FLAG_HIFI_DAC_VOLUME", "I");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); flagId = nullptr; }
+        if (sbClearJniException (env)) flagId = nullptr;
         if (flagId != nullptr) hifiFlag = env->GetStaticIntField (amClass.get(), flagId);
+        sbClearJniException (env);
     }
 
-    const jint streamMusic = 3; // AudioManager.STREAM_MUSIC
-    bool useHifi = (hifiMaxId != nullptr && hifiVolId != nullptr && hifiFlag != 0);
-    int maxVol = 0;
+    v = {};
 
-    if (useHifi)
+    if (hifiMaxId != nullptr && hifiFlag != 0)
     {
-        maxVol = env->CallIntMethod (audioManager.get(), hifiMaxId, streamMusic);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); maxVol = 0; }
-        useHifi = maxVol > 0;
+        v.max = env->CallIntMethod (am, hifiMaxId, streamMusic);
+        if (sbClearJniException (env)) v.max = 0;
+        if (v.max > 0) { v.hifi = true; v.flag = hifiFlag; }
     }
 
-    if (! useHifi)
-        maxVol = env->CallIntMethod (audioManager.get(), getMaxId, streamMusic);
-
-    auto readVolume = [&]() -> int
+    if (! v.hifi && sbIsLgPhone (env))
     {
-        int v = env->CallIntMethod (audioManager.get(), useHifi ? hifiVolId : getVolId, streamMusic);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); v = 0; }
-        return v;
-    };
+        v.max = 75; v.hifi = true; v.flag = 0x20000; // hidden API blocked: use the known LG values
+    }
 
-    const int curVol = readVolume();
+    if (v.hifi)
+    {
+        v.cur = sbReadSystemSettingInt (env, "volume_music_" + sbOutputDeviceKey (env, am), -1);
+        if (v.cur < 0 && hifiVolId != nullptr)
+        {
+            v.cur = env->CallIntMethod (am, hifiVolId, streamMusic);
+            if (sbClearJniException (env)) v.cur = -1;
+        }
+        if (v.cur < 0)
+        {
+            v.cur = env->CallIntMethod (am, getVolId, streamMusic) * 5;
+            sbClearJniException (env);
+        }
+    }
+    else
+    {
+        v.max = env->CallIntMethod (am, getMaxId, streamMusic);
+        v.cur = env->CallIntMethod (am, getVolId, streamMusic);
+        sbClearJniException (env);
+    }
+
+    v.cur = jlimit (0, jmax (0, v.max), v.cur);
+    return v.max > 0;
+}
+
+// Hard limits for volume changes coming from the network (ear safety; independent of the desktop UI).
+// On the 75-step scale; scaled for phones on a different scale.
+static constexpr int sbRemoteVolumeCap75 = 9;   // never set above this from a remote command (9/75 = 12%, for sensitive headphones)
+static constexpr int sbRemoteMaxRaise75  = 10;  // larger single raises need the "!" confirmation marker
+
+static int sbRemoteVolumeCap (const SbPhoneVolume & v)
+{
+    return v.hifi ? jmin (v.max, sbRemoteVolumeCap75) : jmax (1, v.max * sbRemoteVolumeCap75 / 75);
+}
+
+static String sbFormatVolumeReport (const SbPhoneVolume & v, const String & note = {})
+{
+    return "[vol] " + String (v.cur) + "/" + String (v.max)
+           + " (" + String (v.cur * 100 / jmax (1, v.max)) + "%)"
+           + (v.hifi ? " hifi" : " std")
+           + " cap" + String (sbRemoteVolumeCap (v))
+           + (note.isNotEmpty() ? " " + note : String());
+}
+
+// Returns the report line to send back; lastReported receives the index that was reported.
+static String sbApplyVolumeCommand (const String & message, int & lastReported)
+{
+    auto args = message.trim().substring (4).trim();
+
+    // "!" marks a raise the user explicitly confirmed on the desktop
+    const bool confirmed = args.endsWithChar ('!');
+    if (confirmed) args = args.dropLastCharacters (1).trim();
+
+    auto* env = getEnv();
+    if (env == nullptr) return "[vol] error: no JNI env";
+
+    auto am = sbGetAudioManager (env);
+    if (am == nullptr) return "[vol] error: no AudioManager";
+
+    SbPhoneVolume v;
+    if (! sbReadPhoneVolume (env, am.get(), v)) return "[vol] error: cannot read volume";
+
+    const int curVol = v.cur;
     int target = curVol;
 
     if (args.startsWithChar ('+') || args.startsWithChar ('-'))
@@ -130,23 +278,88 @@ static String sbApplyVolumeCommand (const String & message)
     }
     else if (args.isNotEmpty())
     {
-        target = roundToInt (args.getFloatValue() * (float) maxVol / 100.0f); // percent
+        target = roundToInt (args.getFloatValue() * (float) v.max / 100.0f); // percent
     }
 
-    target = jlimit (0, maxVol, target);
+    target = jlimit (0, v.max, target);
+
+    String note;
+    const int cap = sbRemoteVolumeCap (v);
+    const int maxRaise = v.hifi ? sbRemoteMaxRaise75 : jmax (1, v.max * sbRemoteMaxRaise75 / 75);
+
+    if (target > cap && target > curVol)
+    {
+        // Never raise past the cap. If the phone is already above it (set on the phone itself,
+        // e.g. LG touch assistant), leave it alone instead of "raising" it down to the cap.
+        if (curVol >= cap)
+        {
+            lastReported = curVol;
+            return sbFormatVolumeReport (v, "capped");
+        }
+        target = cap;
+        note = "capped";
+    }
+
+    if (target - curVol > maxRaise && ! confirmed)
+    {
+        lastReported = curVol;
+        return sbFormatVolumeReport (v, "refused");
+    }
 
     if (target != curVol)
     {
-        env->CallVoidMethod (audioManager.get(), setVolId, streamMusic, (jint) target, useHifi ? hifiFlag : (jint) 0);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); return "[vol] setStreamVolume failed"; }
+        LocalRef<jclass> amClass (env->GetObjectClass (am.get()));
+        auto setVolId = env->GetMethodID (amClass.get(), "setStreamVolume", "(III)V");
+        auto getVolId = env->GetMethodID (amClass.get(), "getStreamVolume", "(I)I");
+        if (sbClearJniException (env) || setVolId == nullptr || getVolId == nullptr) return "[vol] error: setStreamVolume missing";
+
+        env->CallVoidMethod (am.get(), setVolId, (jint) 3, (jint) target, v.flag);
+        if (sbClearJniException (env)) return "[vol] error: setStreamVolume failed";
+
+        if (v.hifi)
+        {
+            // Safety: if LG ignored the Hi-Fi flag, the index was taken on the 15-step scale (x5),
+            // which can be much louder than asked. The legacy reading is floor(index75 / 5).
+            const int legacy = env->CallIntMethod (am.get(), getVolId, (jint) 3);
+            sbClearJniException (env);
+            if (legacy > target / 5 + 1)
+            {
+                env->CallVoidMethod (am.get(), setVolId, (jint) 3, (jint) (curVol / 5), (jint) 0);
+                sbClearJniException (env);
+                lastReported = -1;
+                return "[vol] error: hifi flag rejected, restored";
+            }
+        }
+
+        v.cur = target; // Settings.System is persisted with a delay, report what was applied
     }
 
-    const int newVol = readVolume();
-    return "[vol] " + String (newVol) + "/" + String (maxVol)
-           + " (" + String (roundToInt (100.0f * (float) newVol / (float) jmax (1, maxVol))) + "%)"
-           + (useHifi ? " hifi" : " std");
+    lastReported = v.cur;
+    return sbFormatVolumeReport (v, note);
+}
+
+// Called periodically on the phone: returns a report line when the volume changed since last report.
+static String sbCheckVolumeChanged (int & lastReported)
+{
+    auto* env = getEnv();
+    if (env == nullptr) return {};
+    auto am = sbGetAudioManager (env);
+    if (am == nullptr) return {};
+
+    SbPhoneVolume v;
+    if (! sbReadPhoneVolume (env, am.get(), v) || v.cur == lastReported) return {};
+
+    lastReported = v.cur;
+    return sbFormatVolumeReport (v);
 }
 #endif
+
+// Lightweight Timer that runs a lambda (used for the phone-volume watcher)
+struct SbLambdaTimer : public Timer
+{
+    std::function<void()> fn;
+    void timerCallback() override { if (fn) fn(); }
+};
 
 String SonobusAudioProcessor::paramInGain     ("ingain");
 String SonobusAudioProcessor::paramDry     ("dry");
@@ -799,6 +1012,22 @@ mState (*this, &mUndoManager, "SonoBusAoO",
 })
 {
     mState.addParameterListener (paramInGain, this);
+
+   #if JUCE_ANDROID
+    // SonoBus-G8X: push phone volume changes (keys, LG touch panel, other apps) to connected peers
+    {
+        auto watcher = std::make_unique<SbLambdaTimer>();
+        watcher->fn = [this]() {
+            if (getNumberRemotePeers() == 0) { mPhoneVolLastReported = -1; return; }
+            auto report = sbCheckVolumeChanged(mPhoneVolLastReported);
+            if (report.isNotEmpty())
+                sendChatEvent(SBChatEvent(SBChatEvent::UserType, getCurrentJoinedGroup(), getCurrentUsername(), "", "", report));
+        };
+        watcher->startTimer(1000);
+        mPhoneVolWatchTimer = std::move(watcher);
+    }
+   #endif
+
     mState.addParameterListener (paramDry, this);
     mState.addParameterListener (paramWet, this);
     mState.addParameterListener (paramInMonitorMonoPan, this);
@@ -960,6 +1189,7 @@ mState (*this, &mUndoManager, "SonoBusAoO",
 
 SonobusAudioProcessor::~SonobusAudioProcessor()
 {
+    mPhoneVolWatchTimer.reset(); // SonoBus-G8X
     mTransportSource.setSource(nullptr);
     mTransportSource.removeChangeListener(this);
 
@@ -2814,11 +3044,34 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                #if JUCE_ANDROID
                 // SonoBus-G8X: apply on the message thread, then report the result back to the group
                 MessageManager::callAsync([this, message]() {
-                    auto status = sbApplyVolumeCommand(message);
+                    auto status = sbApplyVolumeCommand(message, mPhoneVolLastReported);
                     SBChatEvent reply(SBChatEvent::UserType, getCurrentJoinedGroup(), getCurrentUsername(), "", "", status);
                     sendChatEvent(reply);
                 });
                #endif
+            }
+            else if (!isAddressBlocked(endpoint->ipaddr) && sbIsVolumeReport(message)) {
+                // SonoBus-G8X: "[vol] 19/75 (25%) hifi" from the phone -> phone-volume slider state
+                auto body = message.substring(6);
+                auto slash = body.indexOfChar('/');
+                if (slash > 0) {
+                    int cur = body.substring(0, slash).getIntValue();
+                    int mx = body.substring(slash + 1).getIntValue();
+                    auto tokens = StringArray::fromTokens(body, " ", "");
+                    int cap = 0;
+                    for (auto & tok : tokens)
+                        if (tok.startsWith("cap")) cap = tok.substring(3).getIntValue();
+                    if (mx > 0) {
+                        mPhoneVolMax = mx;
+                        mPhoneVolCap = cap > 0 ? cap : mx;
+                        mPhoneVolIndex = cur;
+                        mPhoneVolNote = tokens.contains("refused") ? 2 : (tokens.contains("capped") ? 1 : 0);
+                        ++mPhoneVolSerial;
+                    }
+                }
+                else {
+                    ++mPhoneVolErrorSerial; // error report, e.g. hifi flag rejected
+                }
             }
             else if (!isAddressBlocked(endpoint->ipaddr)) {
 

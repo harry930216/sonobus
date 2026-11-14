@@ -32,8 +32,123 @@
 
 enum {
     PeriodicUpdateTimerId = 0,
-    CheckForNewVersionTimerId
+    CheckForNewVersionTimerId,
+    PhoneVolTimerId // SonoBus-G8X
 };
+
+#if JUCE_WINDOWS
+// SonoBus-G8X: system tray icon with a small phone-volume popup, so SonoBus can stay minimised
+
+static Image sbMakeSpeakerIcon()
+{
+    Image img (Image::ARGB, 32, 32, true);
+    Graphics g (img);
+    g.setColour (Colour (0xff6ec6ff));
+    Path body;
+    body.startNewSubPath (3.0f, 12.0f);
+    body.lineTo (9.0f, 12.0f);
+    body.lineTo (16.0f, 5.0f);
+    body.lineTo (16.0f, 27.0f);
+    body.lineTo (9.0f, 20.0f);
+    body.lineTo (3.0f, 20.0f);
+    body.closeSubPath();
+    g.fillPath (body);
+    for (float r : { 6.0f, 11.0f })
+    {
+        Path arc;
+        arc.addCentredArc (16.0f, 16.0f, r, r, 0.0f, 0.75f, MathConstants<float>::pi - 0.75f, true);
+        g.strokePath (arc, PathStrokeType (2.2f));
+    }
+    return img;
+}
+
+class SonobusAudioProcessorEditor::PhoneVolPopup : public Component, private Timer
+{
+public:
+    PhoneVolPopup (SonobusAudioProcessorEditor & ed) : editor (ed)
+    {
+        title.setText ("G8X Phone Volume", dontSendNotification);
+        title.setJustificationType (Justification::centredLeft);
+        slider.setSliderStyle (Slider::LinearHorizontal);
+        slider.setTextBoxStyle (Slider::TextBoxRight, true, 80, 22);
+        slider.setScrollWheelEnabled (true);
+        slider.textFromValueFunction = editor.mPhoneVolSlider->textFromValueFunction;
+        slider.onDragEnd = [this]() { editor.sendPhoneVolume ((int) slider.getValue()); };
+        slider.onValueChange = [this]() {
+            if (! syncing && ! slider.isMouseButtonDown()) editor.sendPhoneVolume ((int) slider.getValue());
+        };
+        addAndMakeVisible (title);
+        addAndMakeVisible (slider);
+        setSize (320, 70);
+        sync();
+        startTimer (250);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (8, 4);
+        title.setBounds (r.removeFromTop (22));
+        slider.setBounds (r);
+    }
+
+private:
+    void timerCallback() override { sync(); }
+
+    void sync()
+    {
+        auto * src = editor.mPhoneVolSlider.get();
+        if (src == nullptr) return;
+        const ScopedValueSetter<bool> svs (syncing, true);
+        if (slider.getMaximum() != src->getMaximum())
+            slider.setRange (0.0, src->getMaximum(), 1.0);
+        if (! slider.isMouseButtonDown())
+            slider.setValue (src->getValue(), dontSendNotification);
+        slider.updateText();
+        slider.setEnabled (src->isEnabled());
+        title.setText ("G8X Phone Volume   " + editor.mPhoneVolLabel->getText(), dontSendNotification);
+    }
+
+    SonobusAudioProcessorEditor & editor;
+    Label title;
+    Slider slider;
+    bool syncing = false;
+};
+
+class SonobusAudioProcessorEditor::PhoneVolTray : public SystemTrayIconComponent
+{
+public:
+    PhoneVolTray (SonobusAudioProcessorEditor & ed) : editor (ed)
+    {
+        auto icon = sbMakeSpeakerIcon();
+        setIconImage (icon, icon);
+        setIconTooltip ("G8X Phone Volume");
+    }
+
+    void mouseDown (const MouseEvent & e) override
+    {
+        Process::makeForegroundProcess();
+
+        if (e.mods.isPopupMenu()) {
+            PopupMenu menu;
+            menu.addItem ("Show SonoBus", [this]() {
+                if (auto * top = editor.getTopLevelComponent()) {
+                    if (auto * peer = top->getPeer()) peer->setMinimised (false);
+                    top->toFront (true);
+                }
+            });
+            menu.showMenuAsync (PopupMenu::Options());
+            return;
+        }
+
+        auto pos = Desktop::getMousePosition();
+        CallOutBox::launchAsynchronously (std::make_unique<PhoneVolPopup> (editor),
+                                          Rectangle<int> (pos.x - 2, pos.y - 2, 4, 4), nullptr);
+    }
+
+private:
+    SonobusAudioProcessorEditor & editor;
+};
+#endif
 
 
 enum {
@@ -1170,6 +1285,39 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
 
     mTopLevelContainer->addAndMakeVisible(mDrySlider.get());
     mTopLevelContainer->addAndMakeVisible(mOutGainSlider.get());
+
+   #if !(JUCE_IOS || JUCE_ANDROID)
+    // SonoBus-G8X: slider that sets the connected phone's media volume ("/vol =N" chat command)
+    mPhoneVolSlider = std::make_unique<Slider>(Slider::LinearHorizontal, Slider::TextBoxRight);
+    mPhoneVolSlider->setName("phonevol");
+    mPhoneVolSlider->setTitle("Phone Volume");
+    mPhoneVolSlider->setRange(0.0, 75.0, 1.0);
+    mPhoneVolSlider->setValue(0.0, dontSendNotification);
+    mPhoneVolSlider->setTextBoxStyle(Slider::TextBoxRight, true, 90, 20);
+    mPhoneVolSlider->setScrollWheelEnabled(true);
+    mPhoneVolSlider->setWantsKeyboardFocus(true);
+    mPhoneVolSlider->textFromValueFunction = [this](double v) {
+        if (processor.mPhoneVolMax.load() <= 0) return String("--");
+        int i = (int) v;
+        return String(i) + " (" + String(i * 100 / jmax(1, processor.mPhoneVolMax.load())) + "%)";
+    };
+    mPhoneVolSlider->onDragEnd = [this]() { sendPhoneVolume((int) mPhoneVolSlider->getValue()); };
+    mPhoneVolSlider->onValueChange = [this]() {
+        if (!mPhoneVolSlider->isMouseButtonDown()) sendPhoneVolume((int) mPhoneVolSlider->getValue());
+    };
+    mPhoneVolSlider->setEnabled(false);
+    mPhoneVolSlider->updateText();
+
+    mPhoneVolLabel = std::make_unique<Label>("phonevollab", "Phone Vol");
+    mPhoneVolLabel->setJustificationType(Justification::centredRight);
+
+    mTopLevelContainer->addAndMakeVisible(mPhoneVolSlider.get());
+    mTopLevelContainer->addAndMakeVisible(mPhoneVolLabel.get());
+   #endif
+   #if JUCE_WINDOWS
+    if (JUCEApplicationBase::isStandaloneApp())
+        mPhoneVolTray = std::make_unique<PhoneVolTray>(*this);
+   #endif
     //mTopLevelContainer->addAndMakeVisible(mInGainSlider.get());
     mTopLevelContainer->addAndMakeVisible(mMainMuteButton.get());
     mTopLevelContainer->addAndMakeVisible(mMainRecvMuteButton.get());
@@ -1361,6 +1509,7 @@ SonobusAudioProcessorEditor::SonobusAudioProcessorEditor (SonobusAudioProcessor&
     setWantsKeyboardFocus(true);
     
     startTimer(PeriodicUpdateTimerId, 1000);
+    startTimer(PhoneVolTimerId, 250); // SonoBus-G8X
 
 #if (JUCE_WINDOWS || JUCE_MAC)
     if (JUCEApplicationBase::isStandaloneApp()) {
@@ -1861,6 +2010,8 @@ void SonobusAudioProcessorEditor::updateTransportState()
 
 void SonobusAudioProcessorEditor::timerCallback(int timerid)
 {
+    if (timerid == PhoneVolTimerId) { updatePhoneVolume(); return; } // SonoBus-G8X
+
     if (timerid == PeriodicUpdateTimerId) {
         
         bool stateUpdated = updatePeerState();
@@ -5061,6 +5212,19 @@ void SonobusAudioProcessorEditor::updateLayout()
         mainBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0));
         minheight += minitemheight + 8;
     }
+#if !(JUCE_IOS || JUCE_ANDROID)
+    // SonoBus-G8X: phone volume row above the toolbar
+    if (mPhoneVolSlider) {
+        phoneVolBox.items.clear();
+        phoneVolBox.flexDirection = FlexBox::Direction::row;
+        phoneVolBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0));
+        phoneVolBox.items.add(FlexItem(80, minitemheight, *mPhoneVolLabel).withMargin(0).withFlex(0));
+        phoneVolBox.items.add(FlexItem(150, minitemheight, *mPhoneVolSlider).withMargin(0).withFlex(1).withMaxWidth(560));
+        phoneVolBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0));
+        mainBox.items.add(FlexItem(100, minitemheight, phoneVolBox).withMargin(0).withFlex(0)); minheight += minitemheight;
+        mainBox.items.add(FlexItem(4, 4).withMargin(0).withFlex(0)); minheight += 4;
+    }
+#endif
     mainBox.items.add(FlexItem(100, minitemheight + 4, toolbarBox).withMargin(0).withFlex(0)); minheight += minitemheight + 10;
     mainBox.items.add(FlexItem(10, 6).withFlex(0));
         
@@ -6041,3 +6205,98 @@ void SonobusAudioProcessorEditor::SonobusMenuBarModel::menuItemSelected (int men
 #endif
 }
 
+
+// SonoBus-G8X: remote phone volume ------------------------------------------------------------
+
+void SonobusAudioProcessorEditor::sendPhoneVolume(int target)
+{
+    if (!mPhoneVolSlider || processor.getNumberRemotePeers() == 0 || processor.mPhoneVolMax.load() <= 0) return;
+
+    const int cur = processor.mPhoneVolIndex.load();
+    if (target == cur) return;
+
+    // Guard against sudden loud jumps (sensitive headphones): ask before raising more than 5 steps at once.
+    // The phone independently caps remote commands and refuses unconfirmed raises above 10 steps.
+    if (cur >= 0 && target - cur > 5) {
+        Component::SafePointer<SonobusAudioProcessorEditor> safeThis(this);
+        AlertWindow::showOkCancelBox (AlertWindow::QuestionIcon,
+                                      "Phone Volume",
+                                      "Raise phone volume from " + String(cur) + " to " + String(target)
+                                        + " (+" + String(target - cur) + " steps)?",
+                                      "Raise", "Cancel", this,
+                                      ModalCallbackFunction::create ([safeThis, cur, target](int result) {
+                                          if (safeThis == nullptr) return;
+                                          if (result != 0) safeThis->sendPhoneVolumeConfirmed(target, true);
+                                          else safeThis->mPhoneVolSlider->setValue(cur, dontSendNotification);
+                                      }));
+        return;
+    }
+
+    sendPhoneVolumeConfirmed(target, false);
+}
+
+void SonobusAudioProcessorEditor::sendPhoneVolumeConfirmed(int target, bool confirmed)
+{
+    processor.sendChatEvent(SBChatEvent(SBChatEvent::UserType, processor.getCurrentJoinedGroup(),
+                                        processor.getCurrentUsername(), "", "",
+                                        "/vol =" + String(target) + (confirmed ? " !" : "")));
+}
+
+void SonobusAudioProcessorEditor::updatePhoneVolume()
+{
+    if (!mPhoneVolSlider) return;
+
+    const bool connected = processor.getNumberRemotePeers() > 0;
+
+    if (!connected) {
+        if (processor.mPhoneVolMax.load() > 0) {
+            processor.mPhoneVolMax = 0;
+            processor.mPhoneVolIndex = -1;
+            mPhoneVolSlider->updateText();
+        }
+        mPhoneVolQueries = 0;
+        mPhoneVolSlider->setEnabled(false);
+        return;
+    }
+
+    const auto serial = processor.mPhoneVolSerial.load();
+    if (serial != mPhoneVolSeenSerial) {
+        mPhoneVolSeenSerial = serial;
+        const int mx = processor.mPhoneVolMax.load();
+        const int cur = processor.mPhoneVolIndex.load();
+        const int cap = processor.mPhoneVolCap.load();
+        // slider only reaches the phone's remote cap (or the current value, if set higher on the phone)
+        const int top = jmax(1, jmin(mx, jmax(cap, cur)));
+        if (mx > 0 && (int) mPhoneVolSlider->getMaximum() != top)
+            mPhoneVolSlider->setRange(0.0, (double) top, 1.0);
+        if (!mPhoneVolSlider->isMouseButtonDown())
+            mPhoneVolSlider->setValue((double) cur, dontSendNotification);
+        mPhoneVolSlider->updateText();
+        const int note = processor.mPhoneVolNote.load();
+        mPhoneVolLabel->setText(note == 2 ? "Refused" : (note == 1 ? "Max " + String(cap) : "Phone Vol"), dontSendNotification);
+       #if JUCE_WINDOWS
+        if (mPhoneVolTray)
+            mPhoneVolTray->setIconTooltip("G8X " + String(cur) + "/" + String(mx) + " (" + String(cur * 100 / jmax(1, mx)) + "%)");
+       #endif
+    }
+
+    const auto eserial = processor.mPhoneVolErrorSerial.load();
+    if (eserial != mPhoneVolSeenErrorSerial) {
+        mPhoneVolSeenErrorSerial = eserial;
+        mPhoneVolLabel->setText("Vol error", dontSendNotification);
+    }
+
+    const bool hasData = processor.mPhoneVolMax.load() > 0;
+    mPhoneVolSlider->setEnabled(hasData);
+
+    // The phone pushes its volume when a peer connects; ask a few times in case that was missed
+    if (!hasData && mPhoneVolQueries < 5) {
+        const double now = Time::getMillisecondCounterHiRes() * 1e-3;
+        if (now - mPhoneVolLastQuery > 3.0) {
+            mPhoneVolLastQuery = now;
+            ++mPhoneVolQueries;
+            processor.sendChatEvent(SBChatEvent(SBChatEvent::UserType, processor.getCurrentJoinedGroup(),
+                                                processor.getCurrentUsername(), "", "", "/vol"));
+        }
+    }
+}

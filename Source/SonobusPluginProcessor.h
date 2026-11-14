@@ -798,6 +798,16 @@ public:
 
     // chat
     bool sendChatEvent(const SBChatEvent & event);
+
+    // SonoBus-G8X: remote phone media volume (desktop side reads these, filled from "[vol]" reports)
+    std::atomic<int> mPhoneVolIndex { -1 };
+    std::atomic<int> mPhoneVolMax { 0 };
+    std::atomic<int> mPhoneVolCap { 0 };   // highest index the phone accepts from remote commands
+    std::atomic<int> mPhoneVolNote { 0 };  // 0 ok, 1 capped, 2 refused (last report)
+    std::atomic<uint32> mPhoneVolSerial { 0 };
+    std::atomic<uint32> mPhoneVolErrorSerial { 0 };
+    int mPhoneVolLastReported = -1;          // phone side: last index pushed to peers (message thread)
+    std::unique_ptr<Timer> mPhoneVolWatchTimer; // phone side: pushes volume changes to peers
     void setLastChatWidth(int width) { mLastChatWidth = width;}
     int getLastChatWidth() const { return mLastChatWidth; }
     void setLastChatShown(bool shown) { mLastChatShown = shown; }

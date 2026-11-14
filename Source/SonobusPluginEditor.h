@@ -182,6 +182,10 @@ private:
 
     void updateLayout();
 
+    // SonoBus-G8X: remote phone volume
+    void sendPhoneVolume(int target);
+    void updatePhoneVolume();
+
     void updateState(bool rebuildInputChannels = true);
     
     void configKnobSlider(Slider *);
@@ -311,6 +315,21 @@ private:
     
     std::unique_ptr<Slider> mDrySlider;
     std::unique_ptr<Slider> mOutGainSlider;
+
+    // SonoBus-G8X: remote phone volume slider (desktop only)
+    std::unique_ptr<Slider> mPhoneVolSlider;
+    std::unique_ptr<Label> mPhoneVolLabel;
+    FlexBox phoneVolBox;
+    uint32 mPhoneVolSeenSerial = 0;
+    uint32 mPhoneVolSeenErrorSerial = 0;
+    double mPhoneVolLastQuery = 0.0;
+    int mPhoneVolQueries = 0;
+    void sendPhoneVolumeConfirmed(int target, bool confirmed);
+#if JUCE_WINDOWS
+    class PhoneVolTray;
+    class PhoneVolPopup;
+    std::unique_ptr<PhoneVolTray> mPhoneVolTray;
+#endif
     
     std::unique_ptr<SonoDrawableButton> mMainMuteButton;
     std::unique_ptr<SonoDrawableButton> mMainRecvMuteButton;

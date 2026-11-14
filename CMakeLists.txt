@@ -436,6 +436,13 @@ function(sono_add_custom_plugin_target target_name product_name formats is_instr
     endforeach()
     
     
+    # SonoBus-G8X: ASIO needs the Steinberg SDK next to the repo; build without it when absent
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../asiosdk/common/iasiodrv.h")
+        set(SB_JUCE_ASIO 1)
+    else()
+        set(SB_JUCE_ASIO 0)
+    endif()
+
     target_compile_definitions("${target_name}"
         PUBLIC
         JUCE_WEB_BROWSER=0
@@ -445,7 +452,7 @@ function(sono_add_custom_plugin_target target_name product_name formats is_instr
         JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
 	JUCE_USE_WINDOWS_MEDIA_FORMAT=1
         JUCE_LOAD_CURL_SYMBOLS_LAZILY=1
-        JUCE_ASIO=1
+        JUCE_ASIO=${SB_JUCE_ASIO}
         JUCE_WASAPI=1
         JUCE_DIRECTSOUND=0
         JUCE_JACK=1
