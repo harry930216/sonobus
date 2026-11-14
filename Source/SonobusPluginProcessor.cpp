@@ -2,6 +2,8 @@
 // Copyright (C) 2020 Jesse Chappell
 
 
+// SonoBus-G8X: expose JUCE's JNI helpers (getEnv, getAppContext, ...) for the remote volume command
+#define JUCE_CORE_INCLUDE_JNI_HELPERS 1
 
 #include "SonobusPluginProcessor.h"
 #include "SonobusPluginEditor.h"
@@ -40,6 +42,111 @@ typedef int socklen_t;
 #define MAX_DELAY_SAMPLES 192000
 #define SENDBUFSIZE_SCALAR 2.0f
 #define PEER_PING_INTERVAL_MS 2000.0
+
+// SonoBus-G8X: remote control of the phone's media volume through chat messages.
+//   /vol         -> report current volume
+//   /vol 40      -> set to 40% of max
+//   /vol =12     -> set absolute index (75-step scale on LG Quad DAC phones)
+//   /vol +  /vol +3 /vol -  /vol -5 -> step up/down (default 1 step)
+// Returns a status line to send back, or an empty string if the message is not a volume command.
+static bool sbIsVolumeCommand (const String & message)
+{
+    auto t = message.trim();
+    return t == "/vol" || t.startsWith ("/vol ") || t.startsWith ("/vol+") || t.startsWith ("/vol-");
+}
+
+#if JUCE_ANDROID
+static String sbApplyVolumeCommand (const String & message)
+{
+    auto args = message.trim().substring (4).trim();
+
+    auto* env = getEnv();
+    if (env == nullptr) return "[vol] no JNI env";
+
+    LocalRef<jobject> audioManager (env->CallObjectMethod (getAppContext().get(), AndroidContext.getSystemService,
+                                                           javaString ("audio").get()));
+    if (audioManager == nullptr) return "[vol] no AudioManager";
+
+    LocalRef<jclass> amClass (env->GetObjectClass (audioManager.get()));
+    auto getMaxId = env->GetMethodID (amClass.get(), "getStreamMaxVolume", "(I)I");
+    auto getVolId = env->GetMethodID (amClass.get(), "getStreamVolume", "(I)I");
+    auto setVolId = env->GetMethodID (amClass.get(), "setStreamVolume", "(III)V");
+    if (getMaxId == nullptr || getVolId == nullptr || setVolId == nullptr) { env->ExceptionClear(); return "[vol] AudioManager methods missing"; }
+
+    // LG Hi-Fi Quad DAC phones keep STREAM_MUSIC on a 75-step scale, but third-party callers
+    // of the standard API only get the legacy 15-step scale (index x5). LG's own extensions
+    // (FLAG_HIFI_DAC_VOLUME, getHifiStreamMaxVolume, getHifiStreamVolume) address the 75 steps.
+    // Look them up by reflection so the code still works on other phones.
+    auto lookupMethod = [&] (const char* name) -> jmethodID
+    {
+        auto id = env->GetMethodID (amClass.get(), name, "(I)I");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        return id;
+    };
+
+    auto hifiMaxId = lookupMethod ("getHifiStreamMaxVolume");
+    auto hifiVolId = lookupMethod ("getHifiStreamVolume");
+    jint hifiFlag = 0;
+
+    {
+        auto flagId = env->GetStaticFieldID (amClass.get(), "FLAG_HIFI_DAC_VOLUME", "I");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); flagId = nullptr; }
+        if (flagId != nullptr) hifiFlag = env->GetStaticIntField (amClass.get(), flagId);
+    }
+
+    const jint streamMusic = 3; // AudioManager.STREAM_MUSIC
+    bool useHifi = (hifiMaxId != nullptr && hifiVolId != nullptr && hifiFlag != 0);
+    int maxVol = 0;
+
+    if (useHifi)
+    {
+        maxVol = env->CallIntMethod (audioManager.get(), hifiMaxId, streamMusic);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); maxVol = 0; }
+        useHifi = maxVol > 0;
+    }
+
+    if (! useHifi)
+        maxVol = env->CallIntMethod (audioManager.get(), getMaxId, streamMusic);
+
+    auto readVolume = [&]() -> int
+    {
+        int v = env->CallIntMethod (audioManager.get(), useHifi ? hifiVolId : getVolId, streamMusic);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); v = 0; }
+        return v;
+    };
+
+    const int curVol = readVolume();
+    int target = curVol;
+
+    if (args.startsWithChar ('+') || args.startsWithChar ('-'))
+    {
+        int step = args.substring (1).trim().getIntValue();
+        if (step <= 0) step = 1;
+        target = curVol + (args.startsWithChar ('+') ? step : -step);
+    }
+    else if (args.startsWithChar ('='))
+    {
+        target = args.substring (1).trim().getIntValue(); // absolute index on the native scale
+    }
+    else if (args.isNotEmpty())
+    {
+        target = roundToInt (args.getFloatValue() * (float) maxVol / 100.0f); // percent
+    }
+
+    target = jlimit (0, maxVol, target);
+
+    if (target != curVol)
+    {
+        env->CallVoidMethod (audioManager.get(), setVolId, streamMusic, (jint) target, useHifi ? hifiFlag : (jint) 0);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return "[vol] setStreamVolume failed"; }
+    }
+
+    const int newVol = readVolume();
+    return "[vol] " + String (newVol) + "/" + String (maxVol)
+           + " (" + String (roundToInt (100.0f * (float) newVol / (float) jmax (1, maxVol))) + "%)"
+           + (useHifi ? " hifi" : " std");
+}
+#endif
 
 String SonobusAudioProcessor::paramInGain     ("ingain");
 String SonobusAudioProcessor::paramDry     ("dry");
@@ -2702,9 +2809,19 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
             String message (CharPointer_UTF8((it++)->AsString()));
 
             SBChatEvent chatevent(SBChatEvent::UserType, group, from, targets, tags, message);
-            
-            if (!isAddressBlocked(endpoint->ipaddr)) {
-                
+
+            if (!isAddressBlocked(endpoint->ipaddr) && sbIsVolumeCommand(message)) {
+               #if JUCE_ANDROID
+                // SonoBus-G8X: apply on the message thread, then report the result back to the group
+                MessageManager::callAsync([this, message]() {
+                    auto status = sbApplyVolumeCommand(message);
+                    SBChatEvent reply(SBChatEvent::UserType, getCurrentJoinedGroup(), getCurrentUsername(), "", "", status);
+                    sendChatEvent(reply);
+                });
+               #endif
+            }
+            else if (!isAddressBlocked(endpoint->ipaddr)) {
+
                 mAllChatEvents.add(chatevent);
                 clientListeners.call(&SonobusAudioProcessor::ClientListener::sbChatEventReceived, this, chatevent);
             }

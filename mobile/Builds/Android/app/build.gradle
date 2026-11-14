@@ -12,18 +12,11 @@ android {
             version "3.22.1"
         }
     }
-    signingConfigs {
-        juceSigning {
-            storeFile     file("${System.properties['user.home']}${File.separator}.android${File.separator}sonouploadnew.jks")
-            storePassword "${sonoupload_keystore_password}"
-            keyAlias      "${sonoupload_key}"
-            keyPassword   "${sonoupload_key_password}"
-            storeType     "jks"
-        }
-    }
+    // SonoBus-G8X: personal build, signed with the local Android debug key
+    // (the upstream release keystore is not available here).
 
     defaultConfig {
-        applicationId "com.sonosaurus.sonobus"
+        applicationId "com.sonosaurus.sonobus.g8x"
         minSdkVersion    24
         targetSdkVersion 33
         externalNativeBuild {
@@ -38,13 +31,13 @@ android {
              initWith debug
              debuggable    true
              jniDebuggable true
-             signingConfig signingConfigs.juceSigning
+             signingConfig signingConfigs.debug
          }
          release {
              initWith release
              debuggable    false
              jniDebuggable false
-             signingConfig signingConfigs.juceSigning
+             signingConfig signingConfigs.debug
          }
     }
 
@@ -65,6 +58,9 @@ android {
             dimension "default"
         }
         release_ {
+            ndk {
+                abiFilters "arm64-v8a"
+            }
             externalNativeBuild {
                 cmake {
                     cFlags    "-O3"
@@ -108,7 +104,6 @@ android {
         implementation 'androidx.appcompat:appcompat:1.0.2'
     }
 
-ndkVersion "22.0.7026061"
 
 }
 

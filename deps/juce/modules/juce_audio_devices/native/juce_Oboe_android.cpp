@@ -536,13 +536,28 @@ private:
             if (deviceId != -1)
                 builder.setDeviceId (deviceId);
 
+            // SonoBus-G8X: open output streams on the DEEP_BUFFER output.
+            // Measured on LG G8X (dumpsys media.audio_flinger, 2026-11-14): PerformanceMode::None
+            // still lands on the PRIMARY|FAST output thread, which bypasses the ESS Quad DAC;
+            // AudioTrack music playback (where the Quad DAC toggle is audible) uses DEEP_BUFFER.
+            // AAudio maps PowerSaving to AUDIO_OUTPUT_FLAG_DEEP_BUFFER.
+            const bool useNormalOutputPath = (direction == oboe::Direction::Output);
+            const auto performanceMode = useNormalOutputPath ? oboe::PerformanceMode::PowerSaving
+                                                             : oboe::PerformanceMode::LowLatency;
+
             // Note: letting OS to choose the buffer capacity & frames per callback.
             builder.setDirection (direction);
-            builder.setSharingMode (sharingMode);
+            builder.setSharingMode (useNormalOutputPath ? oboe::SharingMode::Shared : sharingMode);
             builder.setChannelCount (channelCount);
             builder.setFormat (format);
             builder.setSampleRate (newSampleRate);
-            builder.setPerformanceMode (oboe::PerformanceMode::LowLatency);
+            builder.setPerformanceMode (performanceMode);
+
+            if (useNormalOutputPath)
+            {
+                builder.setUsage (oboe::Usage::Media);
+                builder.setContentType (oboe::ContentType::Music);
+            }
 
            #if JUCE_USE_ANDROID_OBOE_STABILIZED_CALLBACK
             if (newCallback != nullptr)
@@ -563,7 +578,7 @@ private:
                  + "\nChannelCount = " + String (channelCount)
                  + "\nFormat = " + getOboeString (format)
                  + "\nSampleRate = " + String (newSampleRate)
-                 + "\nPerformanceMode = " + getOboeString (oboe::PerformanceMode::LowLatency));
+                 + "\nPerformanceMode = " + getOboeString (performanceMode));
 
             openResult = builder.openStream (&stream);
             JUCE_OBOE_LOG ("Building Oboe stream with result: " + getOboeString (openResult)
