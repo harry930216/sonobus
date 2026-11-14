@@ -1,4 +1,8 @@
 
+> **非官方修改版（SonoBus G8X）**：這個分支是 SonoBus 1.7.2 的個人修改版，讓電腦的聲音經 LG G8X 的 Quad DAC 播放，並從電腦調整手機音量。與 Sonosaurus 官方無關，改了什麼請看 [README_G8X.md](README_G8X.md)。以下是原專案的說明，未修改。
+>
+> **Unofficial fork (SonoBus G8X)**: personal modifications of SonoBus 1.7.2 for playing PC audio through the LG G8X Quad DAC and controlling the phone volume from the desktop. Not affiliated with Sonosaurus. See [README_G8X.md](README_G8X.md) (Traditional Chinese). The original README follows unchanged.
+
 # SonoBus
 
 SonoBus is an easy to use application for streaming high-quality, low-latency peer-to-peer audio between devices over the internet or a local network.
