@@ -114,7 +114,13 @@ public:
 
     const String getApplicationName() override              { return JucePlugin_Name; }
     const String getApplicationVersion() override           { return JucePlugin_VersionString; }
+#if JUCE_WINDOWS
+    // SonoBus-G8X: single instance, so launching again while hidden in the tray brings the
+    // existing window back instead of starting a second copy that fights over the server port
+    bool moreThanOneInstanceAllowed() override              { return false; }
+#else
     bool moreThanOneInstanceAllowed() override              { return true; }
+#endif
 
     SonoLookAndFeel  sonoLNF;
 
@@ -714,9 +720,17 @@ public:
     void anotherInstanceStarted (const String& url) override    {
         
         DBG("Url handled from another instance: " << url);
-        
+
         if (mainWindow.get() != nullptr) {
-            
+#if JUCE_WINDOWS
+            // SonoBus-G8X: the window may be hidden in the system tray
+            mainWindow->setVisible (true);
+            if (auto * peer = mainWindow->getPeer()) peer->setMinimised (false);
+            mainWindow->toFront (true);
+            if (url.trim().isEmpty())
+                return;
+#endif
+
             if (auto * sonoproc = dynamic_cast<SonobusAudioProcessor*>(mainWindow->pluginHolder->processor.get())) {
                 if (sonoproc->hasEditor()) {
                     if (auto * sonoeditor = dynamic_cast<SonobusAudioProcessorEditor*>(sonoproc->createEditorIfNeeded())) {

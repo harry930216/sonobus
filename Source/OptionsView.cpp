@@ -271,6 +271,14 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
     mOptionsDisableShortcutButton = std::make_unique<ToggleButton>(TRANS("Disable keyboard shortcuts"));
     mOptionsDisableShortcutButton->addListener(this);
 
+#if JUCE_WINDOWS
+    // SonoBus-G8X: close button hides to the system tray (the tray icon menu has Show / Quit)
+    if (JUCEApplicationBase::isStandaloneApp()) {
+        mOptionsCloseToTrayButton = std::make_unique<ToggleButton>(TRANS("Close button hides to system tray (G8X)"));
+        mOptionsCloseToTrayButton->addListener(this);
+    }
+#endif
+
 #if JUCE_IOS
     if (JUCEApplicationBase::isStandaloneApp()) {
         mOptionsAllowBluetoothInput = std::make_unique<ToggleButton>(TRANS("Allow Bluetooth Input"));
@@ -397,6 +405,9 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
     }
     mOptionsComponent->addAndMakeVisible(mOptionsSliderSnapToMouseButton.get());
     mOptionsComponent->addAndMakeVisible(mOptionsDisableShortcutButton.get());
+    if (mOptionsCloseToTrayButton) {
+        mOptionsComponent->addAndMakeVisible(mOptionsCloseToTrayButton.get());
+    }
 
 
 
@@ -640,6 +651,9 @@ void OptionsView::updateState(bool ignorecheck)
 
     mOptionsSliderSnapToMouseButton->setToggleState(processor.getSlidersSnapToMousePosition(), dontSendNotification);
     mOptionsDisableShortcutButton->setToggleState(processor.getDisableKeyboardShortcuts(), dontSendNotification);
+    if (mOptionsCloseToTrayButton) {
+        mOptionsCloseToTrayButton->setToggleState(processor.getCloseToTray(), dontSendNotification);
+    }
 
     uint32 recmask = processor.getDefaultRecordingOptions();
 
@@ -795,6 +809,13 @@ void OptionsView::updateLayout()
     optionsDisableShortcutsBox.items.add(FlexItem(10, 12).withFlex(0));
     optionsDisableShortcutsBox.items.add(FlexItem(180, minpassheight, *mOptionsDisableShortcutButton).withMargin(0).withFlex(1));
 
+    optionsCloseToTrayBox.items.clear();
+    if (mOptionsCloseToTrayButton) {
+        optionsCloseToTrayBox.flexDirection = FlexBox::Direction::row;
+        optionsCloseToTrayBox.items.add(FlexItem(10, 12).withFlex(0));
+        optionsCloseToTrayBox.items.add(FlexItem(180, minpassheight, *mOptionsCloseToTrayButton).withMargin(0).withFlex(1));
+    }
+
 
     optionsAllowBluetoothBox.items.clear();
     optionsAllowBluetoothBox.flexDirection = FlexBox::Direction::row;
@@ -840,6 +861,9 @@ void OptionsView::updateLayout()
         optionsBox.items.add(FlexItem(100, minpassheight, optionsCheckForUpdateBox).withMargin(2).withFlex(0));
     }
     optionsBox.items.add(FlexItem(100, minpassheight, optionsDisableShortcutsBox).withMargin(2).withFlex(0));
+    if (mOptionsCloseToTrayButton) {
+        optionsBox.items.add(FlexItem(100, minpassheight, optionsCloseToTrayBox).withMargin(2).withFlex(0));
+    }
     optionsBox.items.add(FlexItem(100, minpassheight, optionsDynResampleBox).withMargin(2).withFlex(0));
 
     if ( ! JUCEApplicationBase::isStandaloneApp()) {
@@ -1150,6 +1174,9 @@ void OptionsView::buttonClicked (Button* buttonThatWasClicked)
             //    startTimer(CheckForNewVersionTimerId, 3000);
             //}
         }
+    }
+    else if (mOptionsCloseToTrayButton && buttonThatWasClicked == mOptionsCloseToTrayButton.get()) {
+        processor.setCloseToTray(mOptionsCloseToTrayButton->getToggleState());
     }
     else if (buttonThatWasClicked == mOptionsSliderSnapToMouseButton.get()) {
         bool newval = mOptionsSliderSnapToMouseButton->getToggleState();

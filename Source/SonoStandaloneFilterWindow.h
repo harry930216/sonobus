@@ -989,6 +989,17 @@ public:
     {
         pluginHolder->savePluginState();
 
+       #if JUCE_WINDOWS
+        // SonoBus-G8X: optionally keep running in the system tray; the tray icon menu has Show / Quit
+        if (auto * sonoproc = dynamic_cast<SonobusAudioProcessor*> (pluginHolder->processor.get())) {
+            if (sonoproc->getCloseToTray()) {
+                pluginHolder->saveAudioDeviceState();
+                setVisible (false);
+                return;
+            }
+        }
+       #endif
+
         JUCEApplicationBase::getInstance()->systemRequestedQuit();
     }
 

@@ -136,6 +136,7 @@ protected:
     std::unique_ptr<ToggleButton> mOptionsSliderSnapToMouseButton;
     std::unique_ptr<ToggleButton> mOptionsAllowBluetoothInput;
     std::unique_ptr<ToggleButton> mOptionsDisableShortcutButton;
+    std::unique_ptr<ToggleButton> mOptionsCloseToTrayButton; // SonoBus-G8X, Windows standalone only
     std::unique_ptr<TextButton> mOptionsSavePluginDefaultButton;
     std::unique_ptr<TextButton> mOptionsResetPluginDefaultButton;
 
@@ -181,6 +182,7 @@ protected:
     FlexBox optionsAutoReconnectBox;
     FlexBox optionsSnapToMouseBox;
     FlexBox optionsDisableShortcutsBox;
+    FlexBox optionsCloseToTrayBox;
     FlexBox optionsDefaultLevelBox;
     FlexBox optionsLanguageBox;
     FlexBox optionsAllowBluetoothBox;

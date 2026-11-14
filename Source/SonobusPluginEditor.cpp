@@ -136,12 +136,16 @@ public:
 
         if (e.mods.isPopupMenu()) {
             PopupMenu menu;
-            menu.addItem ("Show SonoBus", [this]() {
-                if (auto * top = editor.getTopLevelComponent()) {
-                    if (auto * peer = top->getPeer()) peer->setMinimised (false);
-                    top->toFront (true);
-                }
-            });
+            menu.addItem ("Show SonoBus", [this]() { showMainWindow(); });
+            if (JUCEApplicationBase::isStandaloneApp()) {
+                menu.addSeparator();
+                menu.addItem ("Quit SonoBus", [this]() {
+                    // show the window first so a "you are connected" confirmation is visible
+                    showMainWindow();
+                    if (auto * app = JUCEApplicationBase::getInstance())
+                        app->systemRequestedQuit();
+                });
+            }
             menu.showMenuAsync (PopupMenu::Options());
             return;
         }
@@ -152,6 +156,16 @@ public:
     }
 
 private:
+    void showMainWindow()
+    {
+        // the window may be hidden (close-to-tray) or minimised
+        if (auto * top = editor.getTopLevelComponent()) {
+            top->setVisible (true);
+            if (auto * peer = top->getPeer()) peer->setMinimised (false);
+            top->toFront (true);
+        }
+    }
+
     SonobusAudioProcessorEditor & editor;
 };
 #endif

@@ -579,6 +579,10 @@ public:
     bool getSlidersSnapToMousePosition() const { return mSliderSnapToMouse; }
     void setSlidersSnapToMousePosition(bool flag) {  mSliderSnapToMouse = flag; }
 
+    // SonoBus-G8X: on Windows the window close button hides SonoBus to the system tray instead of quitting
+    bool getCloseToTray() const { return mCloseToTray; }
+    void setCloseToTray(bool flag) { mCloseToTray = flag; }
+
     bool getDisableKeyboardShortcuts() const { return mDisableKeyboardShortcuts; }
     void setDisableKeyboardShortcuts(bool flag) {  mDisableKeyboardShortcuts = flag; }
 
@@ -1264,6 +1268,7 @@ private:
    
     // misc
     bool mSliderSnapToMouse = true;
+    bool mCloseToTray = true; // SonoBus-G8X
     bool mDisableKeyboardShortcuts = false;
     VideoLinkInfo mVideoLinkInfo;
     
