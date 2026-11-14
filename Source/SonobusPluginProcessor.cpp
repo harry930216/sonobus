@@ -76,6 +76,7 @@ struct SbPhoneVolume
     jint flag = 0;       // flags to pass to setStreamVolume
     bool stale = false;  // cur may be outdated (Settings.System not persisted yet)
     int legacy = -1;     // immediate 15-step reading (getStreamVolume), -1 if unknown
+    int stored = -1;     // raw value read from Settings.System (or LG's getter) before pending handling
 };
 
 // Legacy 15-step reading for a 75-step index on the G8X (measured with adb 2026-11-15:
@@ -88,6 +89,7 @@ static int sbLegacyFromIndex75 (int index)
 // After the app sets the volume itself, Settings.System still holds the old value for a moment.
 // Until it shows the new value (or this expires) the watcher must not report the old one.
 static int sbPendingTarget = -1;
+static int sbPendingFrom = -1;     // stored value at the moment we set sbPendingTarget
 static uint32 sbPendingUntilMs = 0;
 
 // Suffix AudioService uses for the per-device Settings.System key "volume_music_<suffix>"
@@ -270,18 +272,27 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
             }
         }
 
-        // our own recent change not persisted yet: the stored value is the old one
+        v.stored = v.cur;
+
+        // Our own recent change may not be persisted yet. Only while the stored value is still the
+        // one from before our change do we substitute the pending target; any third value means
+        // someone else changed the volume meanwhile, and the stored value wins.
         if (sbPendingTarget >= 0)
         {
-            if (v.cur == sbPendingTarget || Time::getMillisecondCounter() > sbPendingUntilMs)
-                sbPendingTarget = -1;
-            else if (sbLegacyFromIndex75 (sbPendingTarget) == legacy)
+            if (v.stored == sbPendingTarget || Time::getMillisecondCounter() > sbPendingUntilMs)
+                sbPendingTarget = -1;                       // persisted, or gave up waiting
+            else if (v.stored == sbPendingFrom)
             {
-                v.cur = sbPendingTarget; // the immediate reading agrees with what we just set
-                v.stale = false;
+                if (sbLegacyFromIndex75 (sbPendingTarget) == legacy)
+                {
+                    v.cur = sbPendingTarget;                // immediate reading agrees with what we set
+                    v.stale = false;
+                }
+                else
+                    v.stale = true;
             }
             else
-                v.stale = true;
+                sbPendingTarget = -1;                       // changed by someone else: trust the stored value
         }
     }
     else
@@ -412,7 +423,8 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
     // the phone itself (e.g. 9 -> 1) that is not persisted yet can still look consistent. If the
     // raise could exceed the limit when measured from the immediate reading's lower bound,
     // re-read once a bit later (the caller retries with deferRequested == nullptr).
-    if (deferRequested != nullptr && v.hifi && v.legacy >= 0 && ! confirmed && target > curVol)
+    // (also when the target looks like a lowering: a stale high reading can hide a real raise)
+    if (deferRequested != nullptr && v.hifi && v.legacy >= 0 && ! confirmed)
     {
         const int lo = v.legacy <= 0 ? 0 : (v.legacy == 1 ? 1 : v.legacy * 5);
         if (target - lo > maxRaise)
@@ -451,6 +463,7 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
 
         v.cur = target; // Settings.System is persisted with a delay, report what was applied
         sbPendingTarget = target;
+        sbPendingFrom = v.stored;
         sbPendingUntilMs = Time::getMillisecondCounter() + 3000;
     }
 
