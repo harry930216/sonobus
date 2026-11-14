@@ -65,17 +65,21 @@ static Image sbMakeSpeakerIcon()
 class SonobusAudioProcessorEditor::PhoneVolPopup : public Component, private Timer
 {
 public:
-    PhoneVolPopup (SonobusAudioProcessorEditor & ed) : editor (ed)
+    PhoneVolPopup (SonobusAudioProcessorEditor & ed) : editor (&ed)
     {
         title.setText ("G8X Phone Volume", dontSendNotification);
         title.setJustificationType (Justification::centredLeft);
         slider.setSliderStyle (Slider::LinearHorizontal);
         slider.setTextBoxStyle (Slider::TextBoxRight, true, 80, 22);
         slider.setScrollWheelEnabled (true);
-        slider.textFromValueFunction = editor.mPhoneVolSlider->textFromValueFunction;
-        slider.onDragEnd = [this]() { editor.sendPhoneVolume ((int) slider.getValue()); };
+        // the popup can outlive the editor, so it only reaches it through a SafePointer
+        slider.textFromValueFunction = [this] (double v) {
+            if (editor == nullptr || editor->mPhoneVolSlider == nullptr) return String ("--");
+            return editor->mPhoneVolSlider->getTextFromValue (v);
+        };
+        slider.onDragEnd = [this]() { if (editor != nullptr) editor->sendPhoneVolume ((int) slider.getValue()); };
         slider.onValueChange = [this]() {
-            if (! syncing && ! slider.isMouseButtonDown()) editor.sendPhoneVolume ((int) slider.getValue());
+            if (editor != nullptr && ! syncing && ! slider.isMouseButtonDown()) editor->sendPhoneVolume ((int) slider.getValue());
         };
         addAndMakeVisible (title);
         addAndMakeVisible (slider);
@@ -96,7 +100,8 @@ private:
 
     void sync()
     {
-        auto * src = editor.mPhoneVolSlider.get();
+        if (editor == nullptr) { slider.setEnabled (false); return; }
+        auto * src = editor->mPhoneVolSlider.get();
         if (src == nullptr) return;
         const ScopedValueSetter<bool> svs (syncing, true);
         if (slider.getMaximum() != src->getMaximum())
@@ -105,11 +110,11 @@ private:
             slider.setValue (src->getValue(), dontSendNotification);
         slider.updateText();
         slider.setEnabled (src->isEnabled());
-        auto status = editor.mPhoneVolLabel->getText();
+        auto status = editor->mPhoneVolLabel->getText();
         title.setText ("G8X Phone Volume" + (status == "Phone Vol" ? String() : "   " + status), dontSendNotification);
     }
 
-    SonobusAudioProcessorEditor & editor;
+    Component::SafePointer<SonobusAudioProcessorEditor> editor;
     Label title;
     Slider slider;
     bool syncing = false;

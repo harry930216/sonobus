@@ -841,7 +841,8 @@ public:
 private:
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SonobusAudioProcessor)
-    
+    JUCE_DECLARE_WEAK_REFERENCEABLE (SonobusAudioProcessor) // SonoBus-G8X: for async volume replies
+
     struct PeerStateCache
     {
         PeerStateCache();

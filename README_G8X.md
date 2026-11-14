@@ -1,6 +1,6 @@
 # SonoBus G8X（非官方修改版）
 
-這是 [SonoBus](https://github.com/sonosaurus/sonobus) 1.7.2 的個人修改版，與 Sonosaurus 官方無關。官方版本請到原專案。
+這是 [SonoBus](https://github.com/sonosaurus/sonobus) 1.7.2 的個人修改版，與 Sonosaurus 官方無關。官方版本請到原專案。修改日期：2026-11-14～15（詳細改動見 `g8x-quaddac` 分支的 commit 紀錄）。
 
 目的：把電腦正在播放的任何聲音，以未壓縮的 PCM 即時送到 LG G8X ThinQ，由手機內建的 ESS Quad DAC（數位類比轉換晶片）轉成類比訊號，再接有線耳機；並且從電腦調整手機的音量。
 
@@ -16,8 +16,11 @@
 - LG 的媒體音量內部是 75 段，第三方 App 用標準 API 只拿得到 15 段。做法是呼叫公開的 `setStreamVolume` 時帶上 LG 的旗標 `0x20000`；目前格數從 `Settings.System` 的 `volume_music_headphone` 讀取。
 - 安全設計（耳機很敏感時用）：
   - 手機端寫死上限：遠端指令最多調到第 9 格（`sbRemoteVolumeCap75`），可依自己的耳機修改。
-  - 一次往上超過 10 格、而且沒有在電腦上確認過的指令，手機直接拒絕；電腦端一次往上超過 5 格會先跳視窗確認。
+  - 一次往上超過 5 格的指令，要在電腦上按確認才會送出；手機端也會檢查，沒有確認記號的直接拒絕。
+  - 剛調完音量、系統設定還沒更新時，手機用即時的 15 段讀數判斷目前的音量，不會因為讀到舊值而誤判成「調低」。
+  - 75 段的寫法只在驗證過的 G8X（型號 `LM-G850`）上啟用；其他手機改用標準的 15 段 API。
   - 寫入後立刻讀回，如果系統沒照 75 段處理，馬上改回原本的音量。
+  - 不是數字的參數一律不動作。
   - 手機上自己調音量（例如 LG 萬用觸控）不受上限限制。
 - `tools/g8x_volume.pyw`：用 adb（要接 USB）調音量的小工具，是較早的做法。adb 路徑寫在 `tools/adb_path.txt`（不進版本控制），沒有這個檔就用 PATH 上的 `adb`。
 
@@ -45,7 +48,7 @@ cmake --build build --config Release --target SonoBus_Standalone
 產物在 `build/SonoBus_artefacts/Release/Standalone/SonoBus.exe`。
 
 ### Android（手機版）
-需要 JDK 17 和 Android SDK。在 `mobile/Builds/Android/local.properties` 設定 `sdk.dir`，然後：
+需要 JDK 17 和 Android SDK。在 `mobile/Builds/Android/local.properties` 設定 `sdk.dir`。這個檔被上游追蹤，裡面會有你的本機路徑；改完先執行 `git update-index --skip-worktree mobile/Builds/Android/local.properties`（讓 git 忽略這個檔的本機修改），以免不小心 commit 出去。然後：
 
 ```
 cd mobile/Builds/Android
