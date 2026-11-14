@@ -275,6 +275,11 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
         {
             if (v.cur == sbPendingTarget || Time::getMillisecondCounter() > sbPendingUntilMs)
                 sbPendingTarget = -1;
+            else if (sbLegacyFromIndex75 (sbPendingTarget) == legacy)
+            {
+                v.cur = sbPendingTarget; // the immediate reading agrees with what we just set
+                v.stale = false;
+            }
             else
                 v.stale = true;
         }
@@ -322,8 +327,12 @@ static String sbFormatVolumeReport (const SbPhoneVolume & v, const String & note
            + (note.isNotEmpty() ? " " + note : String());
 }
 
+// Counts volume commands (message thread only); a deferred command is dropped if a newer one arrived.
+static uint32 sbVolumeCommandSeq = 0;
+
 // Returns the report line to send back; lastReported receives the index that was reported.
-static String sbApplyVolumeCommand (const String & message, int & lastReported)
+// If deferRequested is given and set to true, nothing was changed and the caller should retry later.
+static String sbApplyVolumeCommand (const String & message, int & lastReported, bool* deferRequested = nullptr)
 {
     auto args = message.trim().substring (4).trim();
 
@@ -347,7 +356,7 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported)
     // Only plain unsigned numbers are accepted; anything else changes nothing.
     auto isNumber = [] (const String & s, const char* allowed)
     {
-        return s.isNotEmpty() && s.length() <= 6 && s.containsOnly (allowed);
+        return s.isNotEmpty() && s.length() <= 6 && s.containsOnly (allowed) && s.containsAnyOf ("0123456789");
     };
 
     if (args.startsWithChar ('+') || args.startsWithChar ('-'))
@@ -397,6 +406,20 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported)
     {
         lastReported = curVol;
         return sbFormatVolumeReport (v, "refused");
+    }
+
+    // One 15-step value covers several 75-step values (1..9 all read as 1), so a change made on
+    // the phone itself (e.g. 9 -> 1) that is not persisted yet can still look consistent. If the
+    // raise could exceed the limit when measured from the immediate reading's lower bound,
+    // re-read once a bit later (the caller retries with deferRequested == nullptr).
+    if (deferRequested != nullptr && v.hifi && v.legacy >= 0 && ! confirmed && target > curVol)
+    {
+        const int lo = v.legacy <= 0 ? 0 : (v.legacy == 1 ? 1 : v.legacy * 5);
+        if (target - lo > maxRaise)
+        {
+            *deferRequested = true;
+            return {};
+        }
     }
 
     if (target != curVol)
@@ -3144,9 +3167,23 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                 MessageManager::callAsync([weakThis, message]() {
                     auto* self = weakThis.get();
                     if (self == nullptr) return; // processor already destroyed
-                    auto status = sbApplyVolumeCommand(message, self->mPhoneVolLastReported);
-                    SBChatEvent reply(SBChatEvent::UserType, self->getCurrentJoinedGroup(), self->getCurrentUsername(), "", "", status);
-                    self->sendChatEvent(reply);
+
+                    auto sendReply = [] (SonobusAudioProcessor* p, const String & status) {
+                        p->sendChatEvent(SBChatEvent(SBChatEvent::UserType, p->getCurrentJoinedGroup(), p->getCurrentUsername(), "", "", status));
+                    };
+
+                    const uint32 seq = ++sbVolumeCommandSeq;
+                    bool defer = false;
+                    auto status = sbApplyVolumeCommand(message, self->mPhoneVolLastReported, &defer);
+
+                    if (! defer) { sendReply(self, status); return; }
+
+                    // re-read after the phone has persisted any pending change, unless a newer command came in
+                    Timer::callAfterDelay(650, [weakThis, message, seq, sendReply]() {
+                        auto* s2 = weakThis.get();
+                        if (s2 == nullptr || seq != sbVolumeCommandSeq) return;
+                        sendReply(s2, sbApplyVolumeCommand(message, s2->mPhoneVolLastReported, nullptr));
+                    });
                 });
                #endif
             }
