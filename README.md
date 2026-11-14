@@ -1,132 +1,64 @@
+# SonoBus G8X（非官方修改版）
 
-> **非官方修改版（SonoBus G8X）**：這個分支是 SonoBus 1.7.2 的個人修改版，讓電腦的聲音經 LG G8X 的 Quad DAC 播放，並從電腦調整手機音量。與 Sonosaurus 官方無關，改了什麼請看 [README_G8X.md](README_G8X.md)。以下是原專案的說明，未修改。
->
-> **Unofficial fork (SonoBus G8X)**: personal modifications of SonoBus 1.7.2 for playing PC audio through the LG G8X Quad DAC and controlling the phone volume from the desktop. Not affiliated with Sonosaurus. See [README_G8X.md](README_G8X.md) (Traditional Chinese). The original README follows unchanged.
+這是 [SonoBus](https://github.com/sonosaurus/sonobus) 1.7.2 的個人修改版，與 Sonosaurus 官方無關。官方版本請到原專案；原專案的說明保留在 [README_SONOBUS.md](README_SONOBUS.md)。修改日期：2026-11-14～15（詳細改動見 `g8x-quaddac` 分支的 commit 紀錄）。
 
-# SonoBus
+> Unofficial personal fork of SonoBus 1.7.2 for playing PC audio through the LG G8X Quad DAC and controlling the phone volume from the desktop. Not affiliated with Sonosaurus. The original SonoBus README is kept in [README_SONOBUS.md](README_SONOBUS.md).
 
-SonoBus is an easy to use application for streaming high-quality, low-latency peer-to-peer audio between devices over the internet or a local network.
+目的：把電腦正在播放的任何聲音，以未壓縮的 PCM 即時送到 LG G8X ThinQ，由手機內建的 ESS Quad DAC（數位類比轉換晶片）轉成類比訊號，再接有線耳機；並且從電腦調整手機的音量。
 
-Simply choose a unique group name (with optional password), and instantly connect multiple people together to make music, remote sessions, podcasts, etc. Easily record the audio from everyone, as well as playback any audio content to the whole group.
+## 改了什麼
 
-Connects multiple users together to send and receive audio among all in a group, with fine-grained control over latency, quality and overall mix. Includes optional input compression, noise gate, and EQ effects, along with a master reverb. All settings are dynamic, network statistics are clearly visible.
+### 手機輸出走 Quad DAC
+- Android 的 Oboe 輸出改成 `PerformanceMode::PowerSaving`、共用模式、用途標成媒體（`deps/juce/.../juce_Oboe_android.cpp`）。
+- 原因：G8X 上低延遲的 `PRIMARY|FAST` 輸出不經過 Quad DAC；`DEEP_BUFFER`（深緩衝）輸出才會經過。用 `adb shell dumpsys media.audio_flinger` 確認過。
 
-Works as a standalone application on macOS, Windows, iOS, and Linux, and as an audio plugin (AU, VST) on macOS and Windows. Use it on your desktop or in your DAW, or on your mobile device.
+### 從電腦調手機音量
+- 電腦版：視窗底部的「Phone Vol」調整條，以及 Windows 系統匣的喇叭圖示（點一下跳出小調整條）。
+- 指令走 SonoBus 原本的聊天訊息通道：電腦送 `/vol =N`，手機回 `[vol] 4/75 (5%) hifi cap9`；這些訊息不會出現在聊天框。不另開網路連接埠。
+- LG 的媒體音量內部是 75 段，第三方 App 用標準 API 只拿得到 15 段。做法是呼叫公開的 `setStreamVolume` 時帶上 LG 的旗標 `0x20000`；目前格數從 `Settings.System` 的 `volume_music_headphone` 讀取。
+- 安全設計（耳機很敏感時用）：
+  - 手機端寫死上限：遠端指令最多調到第 9 格（`sbRemoteVolumeCap75`），可依自己的耳機修改。
+  - 一次往上超過 5 格的指令，要在電腦上按確認才會送出；手機端也會檢查，沒有確認記號的直接拒絕。
+  - 剛調完音量、系統設定還沒更新時，手機用即時的 15 段讀數判斷目前的音量，不會因為讀到舊值而誤判成「調低」。
+  - 75 段的寫法只在驗證過的 G8X（型號 `LM-G850`）上啟用；其他手機改用標準的 15 段 API。
+  - 寫入後立刻讀回，如果系統沒照 75 段處理，馬上改回原本的音量。
+  - 不是數字的參數一律不動作。
+  - 手機上自己調音量（例如 LG 萬用觸控）不受上限限制。
+- `tools/g8x_volume.pyw`：用 adb（要接 USB）調音量的小工具，是較早的做法。adb 路徑寫在 `tools/adb_path.txt`（不進版本控制），沒有這個檔就用 PATH 上的 `adb`。
 
-Easy to setup and use, yet still provides all the details that audio nerds want to see. Audio quality can be instantly adjusted from full uncompressed PCM (16, 24, or 32 bit) or with various compressed bitrates (16-256 kbps per channel) using the low-latency Opus codec, and you can do this independently for any of the users you are connected with in a group.
+### 其他
+- CMake：旁邊沒有 Steinberg ASIO SDK 時，自動不編譯 ASIO 支援。
+- Android：套件名稱 `com.sonosaurus.sonobus.g8x`（可以跟官方版並存）、App 名稱「SonoBus G8X」、用除錯金鑰簽章、只編 arm64。
 
+## 限制
 
-<img src="https://sonobus.net/assets/images/sonobus_screenshot.png" width="871" />
+- 手機端最後是 16 位元 48 kHz：`DEEP_BUFFER` 的硬體格式是 16 位元，而且音量是在轉成 16 位元之前於數位端調整。
+- 第三方 App 在 G8X 的 Android 12 上，用公開 API 分配不到 24／32 位元的 `direct_pcm` 直通輸出。實測過 32 位元整數輸出、384 kHz 取樣率、卸載播放（offloaded playback），都還是進混音器。所以電腦端傳 PCM 16 就夠了。
+- 延遲大約 0.3～0.45 秒（網路緩衝加手機深緩衝，推算值）。
+- 音量相關的行為只在 LG G8X（Android 12）上驗證過。
 
-**IMPORTANT TIPS**
+## 建置
 
-SonoBus does not use any echo cancellation, or automatic noise
-reduction in order to maintain the highest audio quality. As a result, if you have a live microphone signal you will need to also use headphones to prevent echos and/or feedback.
-
-For best results, and to achieve the lowest latencies, connect your computer with wired ethernet to your router if you can. Although it will work with WiFi, the added network jitter and packet loss will require you to use a bigger safety buffer to maintain a quality audio signal, which results in higher latencies.
-
-SonoBus does NOT currently use any encryption for the data
-communication, so while it is unlikely that it will be
-intercepted, please keep that in mind. All audio is sent directly between users peer-to-peer, the connection server is only used so that the users in a group can find each other.
-
-
-
-# Installing
-
-## Windows and Mac
-There are binary releases for macOS and Windows available at [sonobus.net](https://sonobus.net) or in the releases of this repository on GitHub.
-
-## Linux
-
-There are packages available for Debian-based Linux distributions as well as a Snap package. See installation instructions at [sonobus.net/linux.html](https://sonobus.net/linux.html).
-
-Or if you prefer, you can build it yourself following the [build instructions](#on-linux) below.
-
-# Building
-
-The original GitHub repository for this project is at
-[github.com/sonosaurus/sonobus](https://github.com/sonosaurus/sonobus).
-
-To build from source on macOS and Windows, all of the dependencies are a part of this GIT repository, including prebuilt Opus libraries. 
-The build now uses [CMake](https://cmake.org) 3.15 or above on macOS, Windows, and Linux platforms, see
-details below.
-
-### On macOS
-
-Make sure you have [CMake](https://cmake.org) >= 3.15 and XCode. Then run:
-```
-./setupcmake.sh
-./buildcmake.sh
-``` 
-The resulting application and plugins will end up under `build/SonoBus_artefacts/Release`
-when the build completes. If you would rather have an Xcode project to look
-at, use `./setupcmakexcode.sh` instead and use the Xcode project that gets
-produced at `buildXcode/SonoBus.xcodeproj`.
-
-### On Windows
-
-You will need [CMake](https://cmake.org) >= 3.15, and  Visual Studio 2017
-installed. You'll also need Cygwin installed if you want to use the scripts
-below, but you can also use CMake in other ways if you prefer.
+### Windows（電腦版）
+需要 Visual Studio 2022 Build Tools（C++ 桌面開發）。
 
 ```
-./setupcmakewin.sh
-./buildcmake.sh
-``` 
-The resulting application and plugins will end up under `build/SonoBus_artefacts/Release`
-when the build completes. The MSVC project/solution can be found in
-build/SonoBus_artefacts as well after the cmake setup step.
+cmake -G "Visual Studio 17 2022" -A x64 -B build
+cmake --build build --config Release --target SonoBus_Standalone
+```
 
+產物在 `build/SonoBus_artefacts/Release/Standalone/SonoBus.exe`。
 
-### On Linux
+### Android（手機版）
+需要 JDK 17 和 Android SDK。在 `mobile/Builds/Android/local.properties` 設定 `sdk.dir`。這個檔被上游追蹤，裡面會有你的本機路徑；改完先執行 `git update-index --skip-worktree mobile/Builds/Android/local.properties`（讓 git 忽略這個檔的本機修改），以免不小心 commit 出去。然後：
 
-The first thing to do in a terminal is go to the Linux directory:
+```
+cd mobile/Builds/Android
+gradlew assembleRelease_Release
+```
 
-    cd linux
+產物在 `app/build/outputs/apk/release_/release/`。
 
-And read the [BUILDING.md](linux/BUILDING.md) file for
-further instructions.
+## 授權
 
-
-# License and 3rd Party Software
-
-SonoBus was written by Jesse Chappell, and it is licensed under the GPLv3, the full license text is in the LICENSE file. Some of the dependencies have their own more permissive licenses.
-
-It is built using JUCE 6 (slightly modified on a public fork), and AOO (Audio over OSC), which also uses the Opus codec. I'm using the very handy tool `git-subrepo` to include the source code for my forks of those software libraries in this repository.
-
-
-My github forks of these that are referenced via `git-subrepo` in this repository are:
-
-> https://github.com/essej/JUCE  in the sono6good branch.
-
-> https://github.com/essej/aoo.git   in the sono branch.
-
-
-If you want to run your own connection server instead of using the default
-one at aoo.sonobus.net, you can build the headless aooserver code at
-
-> https://github.com/essej/aooserver
-
-The standalone SonoBus application also provides a connection server internally,
-which you can connect to on port 10999, or port forward TCP/UDP 10999 from your internet
-router to the machine you are running it on.
-
-
-# Thanks
-
-Thanks for everyone involved in testing, especially to Christof Ressi for
-the AOO library.
-
-### Software development credits:
-
-- For designing and implementing the Soundboard feature:
-    - Sten Wessel
-    - Hannah Schellekens
-
-### Documentation credits:
- - Michael Eskin
- - Tony Becker
-
-### Translation credits:
- - RelationLife (Taewook Yang)
- 
+跟 SonoBus 相同：GPLv3，加上原專案的 App Store 例外條款（見 `LICENSE`、`LICENSE_EXCEPTION`）。SonoBus 原作者是 Jesse Chappell。
