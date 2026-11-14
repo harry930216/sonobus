@@ -105,7 +105,8 @@ private:
             slider.setValue (src->getValue(), dontSendNotification);
         slider.updateText();
         slider.setEnabled (src->isEnabled());
-        title.setText ("G8X Phone Volume   " + editor.mPhoneVolLabel->getText(), dontSendNotification);
+        auto status = editor.mPhoneVolLabel->getText();
+        title.setText ("G8X Phone Volume" + (status == "Phone Vol" ? String() : "   " + status), dontSendNotification);
     }
 
     SonobusAudioProcessorEditor & editor;

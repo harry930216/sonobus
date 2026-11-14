@@ -74,10 +74,24 @@ struct SbPhoneVolume
     int max = 0;
     bool hifi = false;   // true when cur/max are on LG's 75-step Hi-Fi scale
     jint flag = 0;       // flags to pass to setStreamVolume
+    bool stale = false;  // cur may be outdated (Settings.System not persisted yet)
 };
 
+// Legacy 15-step reading for a 75-step index on the G8X (measured with adb 2026-11-15:
+// 0->0, 2/3/4/8/9->1, 15->3): floor(index / 5), but at least 1 when not muted.
+static int sbLegacyFromIndex75 (int index)
+{
+    return index <= 0 ? 0 : jmax (1, index / 5);
+}
+
+// After the app sets the volume itself, Settings.System still holds the old value for a moment.
+// Until it shows the new value (or this expires) the watcher must not report the old one.
+static int sbPendingTarget = -1;
+static uint32 sbPendingUntilMs = 0;
+
 // Suffix AudioService uses for the per-device Settings.System key "volume_music_<suffix>"
-static String sbOutputDeviceKey (JNIEnv* env, jobject am)
+// (guess from getDevices(); see sbOutputDeviceKeys for how it is used)
+static String sbOutputDeviceKeyRaw (JNIEnv* env, jobject am)
 {
     LocalRef<jclass> amClass (env->GetObjectClass (am));
     auto getDevicesId = env->GetMethodID (amClass.get(), "getDevices", "(I)[Landroid/media/AudioDeviceInfo;");
@@ -112,6 +126,18 @@ static String sbOutputDeviceKey (JNIEnv* env, jobject am)
     if (usb)        return "usb_headset";
     if (a2dp)       return "bt_a2dp";
     return "speaker";
+}
+
+// Candidate suffixes, most likely first. On the G8X the 3.5 mm jack is routed as "headphone"
+// even when getDevices() reports a wired headset (2026-11-15: app read "headset"=8 while the
+// active "headphone" was 5), so for wired outputs both are tried, headphone first.
+static StringArray sbOutputDeviceKeys (JNIEnv* env, jobject am)
+{
+    StringArray keys;
+    auto k = sbOutputDeviceKeyRaw (env, am);
+    if (k == "headphone" || k == "headset") { keys.add ("headphone"); keys.add ("headset"); }
+    else keys.add (k);
+    return keys;
 }
 
 static int sbReadSystemSettingInt (JNIEnv* env, const String & key, int fallback)
@@ -203,16 +229,43 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
 
     if (v.hifi)
     {
-        v.cur = sbReadSystemSettingInt (env, "volume_music_" + sbOutputDeviceKey (env, am), -1);
-        if (v.cur < 0 && hifiVolId != nullptr)
+        // The legacy reading is updated immediately; use it to pick a consistent stored value.
+        const int legacy = env->CallIntMethod (am, getVolId, streamMusic);
+        sbClearJniException (env);
+
+        v.cur = -1;
+
+        if (hifiVolId != nullptr) // LG getter, if the hidden-API policy lets us call it
         {
-            v.cur = env->CallIntMethod (am, hifiVolId, streamMusic);
-            if (sbClearJniException (env)) v.cur = -1;
+            int h = env->CallIntMethod (am, hifiVolId, streamMusic);
+            if (! sbClearJniException (env) && h >= 0 && sbLegacyFromIndex75 (h) == legacy)
+                v.cur = h;
         }
+
         if (v.cur < 0)
         {
-            v.cur = env->CallIntMethod (am, getVolId, streamMusic) * 5;
-            sbClearJniException (env);
+            int fallback = -1;
+            for (auto & key : sbOutputDeviceKeys (env, am))
+            {
+                const int val = sbReadSystemSettingInt (env, "volume_music_" + key, -1);
+                if (val < 0) continue;
+                if (fallback < 0) fallback = val;
+                if (sbLegacyFromIndex75 (val) == legacy) { v.cur = val; break; }
+            }
+            if (v.cur < 0)
+            {
+                v.stale = true;
+                v.cur = fallback >= 0 ? fallback : legacy * 5;
+            }
+        }
+
+        // our own recent change not persisted yet: the stored value is the old one
+        if (sbPendingTarget >= 0)
+        {
+            if (v.cur == sbPendingTarget || Time::getMillisecondCounter() > sbPendingUntilMs)
+                sbPendingTarget = -1;
+            else
+                v.stale = true;
         }
     }
     else
@@ -322,7 +375,7 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported)
             // which can be much louder than asked. The legacy reading is floor(index75 / 5).
             const int legacy = env->CallIntMethod (am.get(), getVolId, (jint) 3);
             sbClearJniException (env);
-            if (legacy > target / 5 + 1)
+            if (legacy > sbLegacyFromIndex75 (target))
             {
                 env->CallVoidMethod (am.get(), setVolId, (jint) 3, (jint) (curVol / 5), (jint) 0);
                 sbClearJniException (env);
@@ -332,6 +385,8 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported)
         }
 
         v.cur = target; // Settings.System is persisted with a delay, report what was applied
+        sbPendingTarget = target;
+        sbPendingUntilMs = Time::getMillisecondCounter() + 3000;
     }
 
     lastReported = v.cur;
@@ -347,7 +402,7 @@ static String sbCheckVolumeChanged (int & lastReported)
     if (am == nullptr) return {};
 
     SbPhoneVolume v;
-    if (! sbReadPhoneVolume (env, am.get(), v) || v.cur == lastReported) return {};
+    if (! sbReadPhoneVolume (env, am.get(), v) || v.stale || v.cur == lastReported) return {};
 
     lastReported = v.cur;
     return sbFormatVolumeReport (v);
