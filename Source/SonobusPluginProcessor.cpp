@@ -255,6 +255,8 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
                 v.cur = h;
         }
 
+        int primaryStored = -1; // raw value of the most likely key (headphone first), for pending tracking
+
         if (v.cur < 0)
         {
             int fallback = -1;
@@ -265,6 +267,7 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
                 if (fallback < 0) fallback = val;
                 if (sbLegacyFromIndex75 (val) == legacy) { v.cur = val; break; }
             }
+            primaryStored = fallback;
             if (v.cur < 0)
             {
                 v.stale = true;
@@ -272,7 +275,7 @@ static bool sbReadPhoneVolume (JNIEnv* env, jobject am, SbPhoneVolume & v)
             }
         }
 
-        v.stored = v.cur;
+        v.stored = primaryStored >= 0 ? primaryStored : v.cur;
 
         // Our own recent change may not be persisted yet. Only while the stored value is still the
         // one from before our change do we substitute the pending target; any third value means
@@ -411,6 +414,14 @@ static String sbApplyVolumeCommand (const String & message, int & lastReported, 
         }
         target = cap;
         note = "capped";
+    }
+    else if (target > cap && v.hifi && v.legacy >= 0)
+    {
+        // Lowering from above the cap: one 15-step value covers five 75-step values, so a target
+        // inside the current 15-step bucket could still be above the real value. Never go above the
+        // bucket's lower bound (the quietest the phone can really be at right now).
+        const int lo = v.legacy <= 0 ? 0 : (v.legacy == 1 ? 1 : v.legacy * 5);
+        target = jmin (target, jmax (cap, lo));
     }
 
     if (target - curLow > maxRaise && ! confirmed)
