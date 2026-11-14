@@ -113,7 +113,8 @@ class App:
         self.current = value
         if not self.dragging:
             self.scale.set(value)
-        self.label.config(text=f"{device}　{value} / {MAX_STEPS}")
+        # 手機的音量介面顯示的是百分比（格數 × 100 / 75，無條件捨去），這裡一併顯示方便對照
+        self.label.config(text=f"{device}　{value} / {MAX_STEPS}　（手機顯示 {value * 100 // MAX_STEPS}）")
         self.status.config(text="已同步", fg="gray")
 
     # ---- 讀取 ----
