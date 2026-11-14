@@ -6238,17 +6238,20 @@ void SonobusAudioProcessorEditor::sendPhoneVolume(int target)
     // Guard against sudden loud jumps (sensitive headphones): ask before raising more than 5 steps at once.
     // The phone independently caps remote commands and refuses unconfirmed raises above 5 steps.
     if (cur >= 0 && target - cur > 5) {
+        // Not a native message box: JUCE reports a dismissed native box as its first button ("Raise").
+        // Only an explicit "Raise" counts.
         Component::SafePointer<SonobusAudioProcessorEditor> safeThis(this);
-        AlertWindow::showOkCancelBox (AlertWindow::QuestionIcon,
-                                      "Phone Volume",
-                                      "Raise phone volume from " + String(cur) + " to " + String(target)
-                                        + " (+" + String(target - cur) + " steps)?",
-                                      "Raise", "Cancel", this,
-                                      ModalCallbackFunction::create ([safeThis, cur, target](int result) {
-                                          if (safeThis == nullptr) return;
-                                          if (result != 0) safeThis->sendPhoneVolumeConfirmed(target, true);
-                                          else safeThis->mPhoneVolSlider->setValue(cur, dontSendNotification);
-                                      }));
+        auto * aw = new AlertWindow ("Phone Volume",
+                                     "Raise phone volume from " + String(cur) + " to " + String(target)
+                                       + " (+" + String(target - cur) + " steps)?",
+                                     MessageBoxIconType::QuestionIcon, this);
+        aw->addButton ("Raise", 1);
+        aw->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        aw->enterModalState (true, ModalCallbackFunction::create ([safeThis, cur, target](int result) {
+                                 if (safeThis == nullptr) return;
+                                 if (result == 1) safeThis->sendPhoneVolumeConfirmed(target, true);
+                                 else safeThis->mPhoneVolSlider->setValue(cur, dontSendNotification);
+                             }), true);
         return;
     }
 
@@ -6295,7 +6298,8 @@ void SonobusAudioProcessorEditor::updatePhoneVolume()
             mPhoneVolSlider->setValue((double) cur, dontSendNotification);
         mPhoneVolSlider->updateText();
         const int note = processor.mPhoneVolNote.load();
-        mPhoneVolLabel->setText(note == 2 ? "Refused" : (note == 1 ? "Max " + String(cap) : "Phone Vol"), dontSendNotification);
+        mPhoneVolLabel->setText(note == 2 ? "Refused" : (note == 1 ? "Max " + String(cap)
+                                : (note == 3 ? "Cap refused" : (note == 4 ? "Cap not saved" : "Phone Vol"))), dontSendNotification);
        #if JUCE_WINDOWS
         if (mPhoneVolTray)
             mPhoneVolTray->setIconTooltip("G8X " + String(cur) + "/" + String(mx) + " (" + String(cur * 100 / jmax(1, mx)) + "%)");

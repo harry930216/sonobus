@@ -524,13 +524,7 @@ static String sbApplyVolumeCapCommand (const String & message, int & lastReporte
     const bool confirmed = args.endsWithChar ('!');
     if (confirmed) args = args.dropLastCharacters (1).trim();
 
-    auto* env = getEnv();
-    if (env == nullptr) return "[vol] error: no JNI env";
-    auto am = sbGetAudioManager (env);
-    if (am == nullptr) return "[vol] error: no AudioManager";
-    SbPhoneVolume v;
-    if (! sbReadPhoneVolume (env, am.get(), v)) return "[vol] error: cannot read volume";
-
+    // The cap is changed first, so a lowering still takes effect if the volume cannot be read.
     const int oldCap = proc.getPhoneRemoteCap75();
     String note;
     const auto rest = args.startsWithChar ('=') ? args.substring (1).trim() : String();
@@ -545,24 +539,35 @@ static String sbApplyVolumeCapCommand (const String & message, int & lastReporte
         else if (want > oldCap && ! confirmed)
             note = "caprefused";
         else
-        {
-            proc.setPhoneRemoteCap75 (want);
-            note = "capset";
-        }
+            note = proc.setPhoneRemoteCap75 (want) ? "capset" : "capsavefail";
     }
+
+    auto* env = getEnv();
+    if (env == nullptr) return "[vol] error: no JNI env";
+    auto am = sbGetAudioManager (env);
+    if (am == nullptr) return "[vol] error: no AudioManager";
+    SbPhoneVolume v;
+    if (! sbReadPhoneVolume (env, am.get(), v)) return "[vol] error: cannot read volume";
 
     lastReported = v.cur;
     return sbFormatVolumeReport (v, proc.getPhoneRemoteCap75(), note);
 }
 #endif
 
-void SonobusAudioProcessor::setPhoneRemoteCap75 (int cap75)
+bool SonobusAudioProcessor::setPhoneRemoteCap75 (int cap75)
 {
     const int c = jlimit (1, phoneRemoteCapCeiling75, cap75);
-    mPhoneRemoteCap75 = c;
    #if JUCE_ANDROID
-    sbRemoteCapFile().replaceWithText (String (c));
+    if (! sbRemoteCapFile().replaceWithText (String (c)))
+    {
+        // Not saved: a lowering still applies now (safer), but a raise is refused, so a restart
+        // can never come back with a higher cap than the one in use.
+        if (c < mPhoneRemoteCap75.load()) mPhoneRemoteCap75 = c;
+        return false;
+    }
    #endif
+    mPhoneRemoteCap75 = c;
+    return true;
 }
 
 // Lightweight Timer that runs a lambda (used for the phone-volume watcher)
@@ -1230,7 +1235,10 @@ mState (*this, &mUndoManager, "SonoBusAoO",
     {
         auto saved = sbRemoteCapFile().loadFileAsString().trim();
         if (saved.isNotEmpty() && saved.length() <= 6 && saved.containsOnly("0123456789"))
-            mPhoneRemoteCap75 = jlimit(1, phoneRemoteCapCeiling75, saved.getIntValue());
+        {
+            const int c = saved.getIntValue();
+            if (c >= 1 && c <= phoneRemoteCapCeiling75) mPhoneRemoteCap75 = c; // out of range: keep the default
+        }
     }
 
     // SonoBus-G8X: push phone volume changes (keys, LG touch panel, other apps) to connected peers
@@ -3266,7 +3274,7 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                 MessageManager::callAsync([weakThis, message]() {
                     auto* self = weakThis.get();
                     if (self == nullptr) return;
-                    ++sbVolumeCommandSeq; // drop any deferred volume command; it is re-sent if still wanted
+                    ++sbVolumeCommandSeq; // a deferred volume command waiting for its re-read is dropped (not retried)
                     auto status = sbApplyVolumeCapCommand(message, self->mPhoneVolLastReported, *self);
                     self->sendChatEvent(SBChatEvent(SBChatEvent::UserType, self->getCurrentJoinedGroup(), self->getCurrentUsername(), "", "", status));
                 });
@@ -3324,7 +3332,9 @@ bool SonobusAudioProcessor::handleOtherMessage(EndpointState * endpoint, const c
                         mPhoneVolRemoteCap75 = rcap;
                         mPhoneVolCeil75 = ceil75;
                         mPhoneVolIndex = cur;
-                        mPhoneVolNote = tokens.contains("refused") ? 2 : (tokens.contains("capped") ? 1 : 0);
+                        mPhoneVolNote = tokens.contains("refused") ? 2 : (tokens.contains("capped") ? 1
+                                        : (tokens.contains("caprefused") || tokens.contains("capbad") ? 3
+                                        : (tokens.contains("capsavefail") ? 4 : 0)));
                         ++mPhoneVolSerial;
                     }
                 }

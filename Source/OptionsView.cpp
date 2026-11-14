@@ -284,24 +284,14 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
 #endif
 
 #if !JUCE_IOS
-    // SonoBus-G8X: remote phone-volume cap (75-step scale). Raising asks for confirmation;
-    // the phone never accepts more than its compiled-in ceiling.
-    mOptionsPhoneCapSlider = std::make_unique<Slider>(Slider::LinearHorizontal, Slider::TextBoxRight);
-    mOptionsPhoneCapSlider->setName("phonecap");
-    mOptionsPhoneCapSlider->setTitle(TRANS("G8X remote volume cap"));
-    mOptionsPhoneCapSlider->setRange(1.0, (double) SonobusAudioProcessor::phoneRemoteCapCeiling75, 1.0);
-    mOptionsPhoneCapSlider->setValue((double) SonobusAudioProcessor::phoneRemoteCapDefault75, dontSendNotification);
-    mOptionsPhoneCapSlider->setTextBoxStyle(Slider::TextBoxRight, true, 80, 20);
-    mOptionsPhoneCapSlider->setScrollWheelEnabled(false);
-    mOptionsPhoneCapSlider->textFromValueFunction = [](double v) {
-        const int i = roundToInt(v);
-        return String(i) + " (" + String(i * 100 / 75) + "%)";
-    };
-    mOptionsPhoneCapSlider->onDragEnd = [this]() { phoneCapChanged(roundToInt(mOptionsPhoneCapSlider->getValue())); };
-    mOptionsPhoneCapSlider->onValueChange = [this]() {
-        if (!mPhoneCapSyncing && !mOptionsPhoneCapSlider->isMouseButtonDown())
-            phoneCapChanged(roundToInt(mOptionsPhoneCapSlider->getValue()));
-    };
+    // SonoBus-G8X: remote phone-volume cap (75-step scale), picked from a list of numbers.
+    // Raising asks for confirmation; the phone never accepts more than its compiled-in ceiling.
+    mOptionsPhoneCapChoice = std::make_unique<SonoChoiceButton>();
+    mOptionsPhoneCapChoice->setTitle(TRANS("G8X remote volume cap"));
+    mOptionsPhoneCapChoice->addChoiceListener(this);
+    for (int i = 1; i <= SonobusAudioProcessor::phoneRemoteCapCeiling75; ++i)
+        mOptionsPhoneCapChoice->addItem(String(i) + " (" + String(i * 100 / 75) + "%)", i);
+    mOptionsPhoneCapChoice->setSelectedId(SonobusAudioProcessor::phoneRemoteCapDefault75, dontSendNotification);
     mOptionsPhoneCapLabel = std::make_unique<Label>("", TRANS("G8X remote volume cap"));
     configLabel(mOptionsPhoneCapLabel.get(), false);
     mOptionsPhoneCapLabel->setJustificationType(Justification::centredLeft);
@@ -436,9 +426,9 @@ OptionsView::OptionsView(SonobusAudioProcessor& proc, std::function<AudioDeviceM
     if (mOptionsCloseToTrayButton) {
         mOptionsComponent->addAndMakeVisible(mOptionsCloseToTrayButton.get());
     }
-    if (mOptionsPhoneCapSlider) {
+    if (mOptionsPhoneCapChoice) {
         mOptionsComponent->addAndMakeVisible(mOptionsPhoneCapLabel.get());
-        mOptionsComponent->addAndMakeVisible(mOptionsPhoneCapSlider.get());
+        mOptionsComponent->addAndMakeVisible(mOptionsPhoneCapChoice.get());
         updatePhoneCapControl(true);
         startTimer(PhoneCapTimerId, 500);
     }
@@ -588,11 +578,10 @@ void OptionsView::timerCallback(int timerid)
 
 void OptionsView::updatePhoneCapControl(bool force)
 {
-    if (!mOptionsPhoneCapSlider) return;
-    if (!force && (mOptionsPhoneCapSlider->isMouseButtonDown() || mPhoneCapAsking)) return;
+    if (!mOptionsPhoneCapChoice) return;
+    if (!force && mPhoneCapAsking) return;
 
 #if JUCE_ANDROID
-    const int ceiling = SonobusAudioProcessor::phoneRemoteCapCeiling75;
     const int cap = processor.getPhoneRemoteCap75();
     const bool avail = true;
 #else
@@ -602,14 +591,36 @@ void OptionsView::updatePhoneCapControl(bool force)
     const bool avail = ceiling > 1 && cap > 0 && processor.mPhoneVolMax.load() > 0 && processor.getNumberRemotePeers() > 0;
 #endif
 
-    const ScopedValueSetter<bool> svs(mPhoneCapSyncing, true);
-    if (avail) {
-        if ((int) mOptionsPhoneCapSlider->getMaximum() != ceiling)
-            mOptionsPhoneCapSlider->setRange(1.0, (double) ceiling, 1.0);
-        mOptionsPhoneCapSlider->setValue((double) jlimit(1, ceiling, cap), dontSendNotification);
-    }
-    mOptionsPhoneCapSlider->setEnabled(avail);
-    mOptionsPhoneCapSlider->updateText();
+    if (avail && mOptionsPhoneCapChoice->getSelectedItemIndex() != cap - 1)
+        mOptionsPhoneCapChoice->setSelectedId(jlimit(1, SonobusAudioProcessor::phoneRemoteCapCeiling75, cap), dontSendNotification);
+    mOptionsPhoneCapChoice->setEnabled(avail);
+}
+
+// Asks before raising the cap; done(true) only for an explicit "Raise".
+// JUCE maps a dismissed native box (back key, tap outside, screen turning off on Android) to the
+// box's first button, so "Cancel" is always the first button here, and on the desktop a JUCE-drawn
+// window is used whose only way to return 1 is the "Raise" button.
+static void sbConfirmCapRaise (Component * assoc, int oldCap, int newCap, std::function<void(bool)> done)
+{
+    const String title = TRANS("Remote Volume Cap");
+    const String message = "Raise the remote volume cap from " + String(oldCap) + " (" + String(oldCap * 100 / 75)
+                           + "%) to " + String(newCap) + " (" + String(newCap * 100 / 75) + "%)? "
+                           + "Remote commands can then set the phone volume up to " + String(newCap * 100 / 75) + "%.";
+#if JUCE_ANDROID
+    NativeMessageBox::showAsync(MessageBoxOptions()
+                                    .withIconType(MessageBoxIconType::NoIcon)
+                                    .withTitle(title)
+                                    .withMessage(message)
+                                    .withButton(TRANS("Cancel"))   // index 0: also what a dismissal returns
+                                    .withButton(TRANS("Raise"))    // index 1
+                                    .withAssociatedComponent(assoc),
+                                [done] (int result) { done(result == 1); });
+#else
+    auto * aw = new AlertWindow(title, message, MessageBoxIconType::NoIcon, assoc);
+    aw->addButton(TRANS("Raise"), 1);
+    aw->addButton(TRANS("Cancel"), 0, KeyPress(KeyPress::escapeKey));
+    aw->enterModalState(true, ModalCallbackFunction::create([done] (int result) { done(result == 1); }), true);
+#endif
 }
 
 void OptionsView::phoneCapChanged(int newCap)
@@ -619,28 +630,27 @@ void OptionsView::phoneCapChanged(int newCap)
     const int oldCap = processor.getPhoneRemoteCap75();
 #else
     const int ceiling = processor.mPhoneVolCeil75.load();
-    const int oldCap = processor.mPhoneVolRemoteCap75.load();
+    int oldCap = processor.mPhoneVolRemoteCap75.load();
     if (ceiling <= 1 || oldCap <= 0 || processor.getNumberRemotePeers() == 0) { updatePhoneCapControl(true); return; }
+    // Until the phone reports back, compare with what was last sent, so a quick change back to the
+    // reported value is still sent, and a raise from a just-sent lower value still asks.
+    if (mPhoneCapLastSent > 0 && Time::getMillisecondCounterHiRes() < mPhoneCapHoldUntilMs)
+        oldCap = mPhoneCapLastSent;
 #endif
+    if (mPhoneCapAsking) return; // a raise confirmation is already open
     newCap = jlimit(1, ceiling, newCap);
-    if (newCap == oldCap) return;
+    if (newCap == oldCap) { updatePhoneCapControl(true); return; }
 
     if (newCap > oldCap) {
         // raising the cap always asks first (lowering is always safe)
         mPhoneCapAsking = true;
         Component::SafePointer<OptionsView> safeThis(this);
-        AlertWindow::showOkCancelBox(AlertWindow::WarningIcon,
-                                     TRANS("Remote Volume Cap"),
-                                     "Raise the G8X remote volume cap from " + String(oldCap) + " (" + String(oldCap * 100 / 75)
-                                       + "%) to " + String(newCap) + " (" + String(newCap * 100 / 75) + "%)?\n"
-                                       + "Remote commands can then set the phone volume up to " + String(newCap * 100 / 75) + "%.",
-                                     TRANS("Raise"), TRANS("Cancel"), this,
-                                     ModalCallbackFunction::create([safeThis, newCap](int result) {
-                                         if (safeThis == nullptr) return;
-                                         safeThis->mPhoneCapAsking = false;
-                                         if (result != 0) safeThis->applyPhoneCap(newCap, true);
-                                         else safeThis->updatePhoneCapControl(true);
-                                     }));
+        sbConfirmCapRaise(this, oldCap, newCap, [safeThis, newCap] (bool raise) {
+            if (safeThis == nullptr) return;
+            safeThis->mPhoneCapAsking = false;
+            if (raise) safeThis->applyPhoneCap(newCap, true);
+            else safeThis->updatePhoneCapControl(true);
+        });
         return;
     }
 
@@ -651,16 +661,19 @@ void OptionsView::applyPhoneCap(int newCap, bool confirmed)
 {
 #if JUCE_ANDROID
     ignoreUnused(confirmed);
-    processor.setPhoneRemoteCap75(newCap);
+    const bool saved = processor.setPhoneRemoteCap75(newCap);
     processor.mPhoneVolLastReported = -1; // the phone's watcher pushes the new cap to connected peers
     updatePhoneCapControl(true);
+    if (!saved)
+        AlertWindow::showMessageBoxAsync(MessageBoxIconType::NoIcon, TRANS("Remote Volume Cap"),
+                                         "The cap could not be saved. A lower cap is used until the app restarts; a higher one was not applied.");
 #else
     processor.sendChatEvent(SBChatEvent(SBChatEvent::UserType, processor.getCurrentJoinedGroup(),
                                         processor.getCurrentUsername(), "", "",
                                         "/volcap =" + String(newCap) + (confirmed ? " !" : "")));
+    mPhoneCapLastSent = newCap;
     mPhoneCapHoldUntilMs = Time::getMillisecondCounterHiRes() + 1500.0;
-    const ScopedValueSetter<bool> svs(mPhoneCapSyncing, true);
-    mOptionsPhoneCapSlider->setValue((double) newCap, dontSendNotification);
+    mOptionsPhoneCapChoice->setSelectedId(newCap, dontSendNotification);
 #endif
 }
 
@@ -924,11 +937,11 @@ void OptionsView::updateLayout()
     optionsDisableShortcutsBox.items.add(FlexItem(180, minpassheight, *mOptionsDisableShortcutButton).withMargin(0).withFlex(1));
 
     optionsPhoneCapBox.items.clear();
-    if (mOptionsPhoneCapSlider) {
+    if (mOptionsPhoneCapChoice) {
         optionsPhoneCapBox.flexDirection = FlexBox::Direction::row;
         optionsPhoneCapBox.items.add(FlexItem(10, 12).withFlex(0));
-        optionsPhoneCapBox.items.add(FlexItem(150, minitemheight, *mOptionsPhoneCapLabel).withMargin(0).withFlex(0));
-        optionsPhoneCapBox.items.add(FlexItem(120, minitemheight, *mOptionsPhoneCapSlider).withMargin(0).withFlex(1));
+        optionsPhoneCapBox.items.add(FlexItem(150, minitemheight, *mOptionsPhoneCapLabel).withMargin(0).withFlex(1));
+        optionsPhoneCapBox.items.add(FlexItem(120, minitemheight, *mOptionsPhoneCapChoice).withMargin(0).withFlex(0));
     }
 
     optionsCloseToTrayBox.items.clear();
@@ -969,7 +982,7 @@ void OptionsView::updateLayout()
     optionsBox.items.add(FlexItem(100, minitemheight, optionsAutoDropThreshBox).withMargin(2).withFlex(0));
     optionsBox.items.add(FlexItem(4, 10));
     optionsBox.items.add(FlexItem(100, minitemheight, optionsDefaultLevelBox).withMargin(2).withFlex(0));
-    if (mOptionsPhoneCapSlider) {
+    if (mOptionsPhoneCapChoice) {
         optionsBox.items.add(FlexItem(100, minitemheight, optionsPhoneCapBox).withMargin(2).withFlex(0));
     }
     optionsBox.items.add(FlexItem(4, 6));
@@ -1374,6 +1387,9 @@ void OptionsView::choiceButtonSelected(SonoChoiceButton *comp, int index, int id
 {
     if (comp == mOptionsFormatChoiceDefaultChoice.get()) {
         processor.setDefaultAudioCodecFormat(index);
+    }
+    else if (mOptionsPhoneCapChoice && comp == mOptionsPhoneCapChoice.get()) {
+        phoneCapChanged(ident); // SonoBus-G8X
     }
     else if (comp == mOptionsAutosizeDefaultChoice.get()) {
         processor.setDefaultAutoresizeBufferMode((SonobusAudioProcessor::AutoNetBufferMode) ident);

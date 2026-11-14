@@ -140,10 +140,10 @@ protected:
 
     // SonoBus-G8X: remote phone-volume cap (phone: edits its own cap; desktop: sends "/volcap")
     std::unique_ptr<Label> mOptionsPhoneCapLabel;
-    std::unique_ptr<Slider> mOptionsPhoneCapSlider;
-    bool mPhoneCapSyncing = false;
+    std::unique_ptr<SonoChoiceButton> mOptionsPhoneCapChoice;
     bool mPhoneCapAsking = false;         // a raise confirmation is open
     double mPhoneCapHoldUntilMs = 0.0;    // desktop: keep the sent value shown until the phone reports
+    int mPhoneCapLastSent = 0;            // desktop: last cap sent, compared against until the phone reports
     void phoneCapChanged(int newCap);
     void applyPhoneCap(int newCap, bool confirmed);
     void updatePhoneCapControl(bool force = false);
